@@ -15,15 +15,13 @@
 #include <cstring>
 #include <cmath>
 
-#include <immintrin.h>
-
-
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <omp.h>
 
+#include <immintrin.h>
 
 #include <algorithm>
 #include <vector>
@@ -56,6 +54,9 @@ int sorgqr_(FINTEGER *m, FINTEGER *n, FINTEGER *k, float *a,
             FINTEGER *lda, float *tau, float *work,
             FINTEGER *lwork, FINTEGER *info);
 
+int sgemv_(const char *trans, FINTEGER *m, FINTEGER *n, float *alpha,
+           const float *a, FINTEGER *lda, const float *x, FINTEGER *incx,
+           float *beta, float *y, FINTEGER *incy);
 
 }
 
@@ -65,10 +66,6 @@ int sorgqr_(FINTEGER *m, FINTEGER *n, FINTEGER *k, float *a,
  **************************************************/
 
 namespace faiss {
-
-#ifdef __AVX__
-#define USE_AVX
-#endif
 
 double getmillisecs () {
     struct timeval tv;
@@ -112,109 +109,32 @@ size_t get_mem_usage_kb ()
  * Random data generation functions
  **************************************************/
 
-/**
- * The definition of random functions depends on the architecture:
- *
- * - for Linux, we rely on re-entrant functions (random_r). This
- *   provides good quality reproducible random sequences.
- *
- * - for Apple, we use rand_r. Apple is trying so hard to deprecate
- *   this function that it removed its definition form stdlib.h, so we
- *   re-declare it below. Fortunately, since it is deprecated, its
- *   prototype should not change much in the forerseeable future.
- *
- * Unfortunately, system designers are more concerned with making the
- * most unpredictable random sequences for cryptographic use, when in
- * scientific contexts what acutally matters is having reproducible
- * squences in multi-threaded contexts.
- */
-
-
-#ifdef __linux__
-
-
-
+RandomGenerator::RandomGenerator (long seed)
+    : mt((unsigned int)seed) {}
 
 int RandomGenerator::rand_int ()
 {
-    int32_t a;
-    random_r (&rand_data, &a);
-    return a;
+    return mt() & 0x7fffffff;
 }
 
 long RandomGenerator::rand_long ()
 {
-    int32_t a, b;
-    random_r (&rand_data, &a);
-    random_r (&rand_data, &b);
-    return long(a) | long(b) << 31;
+    return long(rand_int()) | long(rand_int()) << 31;
 }
-
-
-RandomGenerator::RandomGenerator (long seed)
-{
-    memset (&rand_data, 0, sizeof (rand_data));
-    initstate_r (seed, rand_state, sizeof (rand_state), &rand_data);
-}
-
-
-RandomGenerator::RandomGenerator (const RandomGenerator & other)
-{
-    memcpy (rand_state, other.rand_state, sizeof(rand_state));
-    rand_data = other.rand_data;
-    setstate_r (rand_state, &rand_data);
-}
-
-
-#elif __APPLE__
-
-extern "C" {
-int rand_r(unsigned *seed);
-}
-
-RandomGenerator::RandomGenerator (long seed)
-{
-    rand_state = seed;
-}
-
-
-RandomGenerator::RandomGenerator (const RandomGenerator & other)
-{
-    rand_state = other.rand_state;
-}
-
-
-int RandomGenerator::rand_int ()
-{
-    // RAND_MAX is 31 bits
-    // try to add more randomness in the lower bits
-    int lowbits = rand_r(&rand_state) >> 15;
-    return rand_r(&rand_state) ^ lowbits;
-}
-
-long RandomGenerator::rand_long ()
-{
-    return long(random()) | long(random()) << 31;
-}
-
-
-
-#endif
 
 int RandomGenerator::rand_int (int max)
-{   // this suffers form non-uniform probabilities when max is not a
-    // power of 2, but if RAND_MAX >> max the bias is limited.
-    return rand_int () % max;
+{
+    return mt() % max;
 }
 
 float RandomGenerator::rand_float ()
 {
-    return rand_int() / float(1L << 31);
+    return mt() / float(mt.max());
 }
 
 double RandomGenerator::rand_double ()
 {
-    return rand_long() / double(1L << 62);
+    return mt() / double(mt.max());
 }
 
 
@@ -393,260 +313,6 @@ void reflection_ref (const float * u, float * x, size_t n, size_t d, size_t nu)
     }
 }
 
-/*********************************************************
- * Optimized distance computations
- *********************************************************/
-
-
-
-/* Functions to compute:
-   - L2 distance between 2 vectors
-   - inner product between 2 vectors
-   - L2 norm of a vector
-
-   The functions should probably not be invoked when a large number of
-   vectors are be processed in batch (in which case Matrix multiply
-   is faster), but may be useful for comparing vectors isolated in
-   memory.
-
-   Works with any vectors of any dimension, even unaligned (in which
-   case they are slower).
-
-*/
-
-
-/*********************************************************
- * Reference implementations
- */
-
-
-
-/* same without SSE */
-float fvec_L2sqr_ref (const float * x,
-                     const float * y,
-                     size_t d)
-{
-    size_t i;
-    float res = 0;
-    for (i = 0; i < d; i++) {
-        const float tmp = x[i] - y[i];
-       res += tmp * tmp;
-    }
-    return res;
-}
-
-float fvec_inner_product_ref (const float * x,
-                             const float * y,
-                             size_t d)
-{
-    size_t i;
-    float res = 0;
-    for (i = 0; i < d; i++)
-       res += x[i] * y[i];
-    return res;
-}
-
-float fvec_norm_L2sqr_ref (const float * __restrict x,
-                          size_t d)
-{
-    size_t i;
-    double res = 0;
-    for (i = 0; i < d; i++)
-       res += x[i] * x[i];
-    return res;
-}
-
-
-/*********************************************************
- * SSE and AVX implementations
- */
-
-// reads 0 <= d < 4 floats as __m128
-static inline __m128 masked_read (int d, const float *x)
-{
-    assert (0 <= d && d < 4);
-    __attribute__((__aligned__(16))) float buf[4] = {0, 0, 0, 0};
-    switch (d) {
-      case 3:
-        buf[2] = x[2];
-      case 2:
-        buf[1] = x[1];
-      case 1:
-        buf[0] = x[0];
-    }
-    return _mm_load_ps (buf);
-    // cannot use AVX2 _mm_mask_set1_epi32
-}
-
-#ifdef USE_AVX
-
-// reads 0 <= d < 8 floats as __m256
-static inline __m256 masked_read_8 (int d, const float *x)
-{
-    assert (0 <= d && d < 8);
-    if (d < 4) {
-        __m256 res = _mm256_setzero_ps ();
-        res = _mm256_insertf128_ps (res, masked_read (d, x), 0);
-        return res;
-    } else {
-        __m256 res = _mm256_setzero_ps ();
-        res = _mm256_insertf128_ps (res, _mm_loadu_ps (x), 0);
-        res = _mm256_insertf128_ps (res, masked_read (d - 4, x + 4), 1);
-        return res;
-    }
-}
-
-float fvec_inner_product (const float * x,
-                          const float * y,
-                          size_t d)
-{
-    __m256 msum1 = _mm256_setzero_ps();
-
-    while (d >= 8) {
-        __m256 mx = _mm256_loadu_ps (x); x += 8;
-        __m256 my = _mm256_loadu_ps (y); y += 8;
-        msum1 = _mm256_add_ps (msum1, _mm256_mul_ps (mx, my));
-        d -= 8;
-    }
-
-    __m128 msum2 = _mm256_extractf128_ps(msum1, 1);
-    msum2 +=       _mm256_extractf128_ps(msum1, 0);
-
-    if (d >= 4) {
-        __m128 mx = _mm_loadu_ps (x); x += 4;
-        __m128 my = _mm_loadu_ps (y); y += 4;
-        msum2 = _mm_add_ps (msum2, _mm_mul_ps (mx, my));
-        d -= 4;
-    }
-
-    if (d > 0) {
-        __m128 mx = masked_read (d, x);
-        __m128 my = masked_read (d, y);
-        msum2 = _mm_add_ps (msum2, _mm_mul_ps (mx, my));
-    }
-
-    msum2 = _mm_hadd_ps (msum2, msum2);
-    msum2 = _mm_hadd_ps (msum2, msum2);
-    return  _mm_cvtss_f32 (msum2);
-}
-
-float fvec_L2sqr (const float * x,
-                 const float * y,
-                 size_t d)
-{
-    __m256 msum1 = _mm256_setzero_ps();
-
-    while (d >= 8) {
-        __m256 mx = _mm256_loadu_ps (x); x += 8;
-        __m256 my = _mm256_loadu_ps (y); y += 8;
-        const __m256 a_m_b1 = mx - my;
-        msum1 += a_m_b1 * a_m_b1;
-        d -= 8;
-    }
-
-    __m128 msum2 = _mm256_extractf128_ps(msum1, 1);
-    msum2 +=       _mm256_extractf128_ps(msum1, 0);
-
-    if (d >= 4) {
-        __m128 mx = _mm_loadu_ps (x); x += 4;
-        __m128 my = _mm_loadu_ps (y); y += 4;
-        const __m128 a_m_b1 = mx - my;
-        msum2 += a_m_b1 * a_m_b1;
-        d -= 4;
-    }
-
-    if (d > 0) {
-        __m128 mx = masked_read (d, x);
-        __m128 my = masked_read (d, y);
-        __m128 a_m_b1 = mx - my;
-        msum2 += a_m_b1 * a_m_b1;
-    }
-
-    msum2 = _mm_hadd_ps (msum2, msum2);
-    msum2 = _mm_hadd_ps (msum2, msum2);
-    return  _mm_cvtss_f32 (msum2);
-}
-
-#else
-
-/* SSE-implementation of L2 distance */
-float fvec_L2sqr (const float * x,
-                 const float * y,
-                 size_t d)
-{
-    __m128 msum1 = _mm_setzero_ps();
-
-    while (d >= 4) {
-        __m128 mx = _mm_loadu_ps (x); x += 4;
-        __m128 my = _mm_loadu_ps (y); y += 4;
-        const __m128 a_m_b1 = mx - my;
-        msum1 += a_m_b1 * a_m_b1;
-        d -= 4;
-    }
-
-    if (d > 0) {
-        // add the last 1, 2 or 3 values
-        __m128 mx = masked_read (d, x);
-        __m128 my = masked_read (d, y);
-        __m128 a_m_b1 = mx - my;
-        msum1 += a_m_b1 * a_m_b1;
-    }
-
-    msum1 = _mm_hadd_ps (msum1, msum1);
-    msum1 = _mm_hadd_ps (msum1, msum1);
-    return  _mm_cvtss_f32 (msum1);
-}
-
-
-float fvec_inner_product (const float * x,
-                         const float * y,
-                         size_t d)
-{
-    __m128 mx, my;
-    __m128 msum1 = _mm_setzero_ps();
-
-    while (d >= 4) {
-        mx = _mm_loadu_ps (x); x += 4;
-        my = _mm_loadu_ps (y); y += 4;
-        msum1 = _mm_add_ps (msum1, _mm_mul_ps (mx, my));
-        d -= 4;
-    }
-
-    // add the last 1, 2, or 3 values
-    mx = masked_read (d, x);
-    my = masked_read (d, y);
-    __m128 prod = _mm_mul_ps (mx, my);
-
-    msum1 = _mm_add_ps (msum1, prod);
-
-    msum1 = _mm_hadd_ps (msum1, msum1);
-    msum1 = _mm_hadd_ps (msum1, msum1);
-    return  _mm_cvtss_f32 (msum1);
-}
-
-
-
-#endif
-
-float fvec_norm_L2sqr (const float *  x,
-                      size_t d)
-{
-    __m128 mx;
-    __m128 msum1 = _mm_setzero_ps();
-
-    while (d >= 4) {
-        mx = _mm_loadu_ps (x); x += 4;
-        msum1 = _mm_add_ps (msum1, _mm_mul_ps (mx, mx));
-        d -= 4;
-    }
-
-    mx = masked_read (d, x);
-    msum1 = _mm_add_ps (msum1, _mm_mul_ps (mx, mx));
-
-    msum1 = _mm_hadd_ps (msum1, msum1);
-    msum1 = _mm_hadd_ps (msum1, msum1);
-    return  _mm_cvtss_f32 (msum1);
-}
 
 
 
@@ -661,31 +327,27 @@ float fvec_norm_L2sqr (const float *  x,
    a set of ny vectors y.
    These functions are not intended to replace BLAS matrix-matrix, as they
    would be significantly less efficient in this case. */
-void fvec_inner_products_ny (float * __restrict ip,
+void fvec_inner_products_ny (float * ip,
                              const float * x,
                              const float * y,
                              size_t d, size_t ny)
 {
+    // Not sure which one is fastest
+#if 0
+    {
+        FINTEGER di = d;
+        FINTEGER nyi = ny;
+        float one = 1.0, zero = 0.0;
+        FINTEGER onei = 1;
+        sgemv_ ("T", &di, &nyi, &one, y, &di, x, &onei, &zero, ip, &onei);
+    }
+#endif
     for (size_t i = 0; i < ny; i++) {
         ip[i] = fvec_inner_product (x, y, d);
         y += d;
     }
 }
 
-
-
-
-/* compute ny L2 distances between x and a set of vectors y */
-void fvec_L2sqr_ny (float * __restrict dis,
-                    const float * x,
-                    const float * y,
-                    size_t d, size_t ny)
-{
-    for (size_t i = 0; i < ny; i++) {
-        dis[i] = fvec_L2sqr (x, y, d);
-        y += d;
-    }
-}
 
 
 
@@ -759,27 +421,33 @@ static void knn_inner_product_sse (const float * x,
                         float_minheap_array_t * res)
 {
     size_t k = res->k;
+    size_t check_period = InterruptCallback::get_period_hint (ny * d);
+
+    for (size_t i0 = 0; i0 < nx; i0 += check_period) {
+        size_t i1 = std::min(i0 + check_period, nx);
 
 #pragma omp parallel for
-    for (size_t i = 0; i < nx; i++) {
-        const float * x_i = x + i * d;
-        const float * y_j = y;
+        for (size_t i = i0; i < i1; i++) {
+            const float * x_i = x + i * d;
+            const float * y_j = y;
 
-        float * __restrict simi = res->get_val(i);
-        long * __restrict idxi = res->get_ids (i);
+            float * __restrict simi = res->get_val(i);
+            long * __restrict idxi = res->get_ids (i);
 
-        minheap_heapify (k, simi, idxi);
+            minheap_heapify (k, simi, idxi);
 
-        for (size_t j = 0; j < ny; j++) {
-            float ip = fvec_inner_product (x_i, y_j, d);
+            for (size_t j = 0; j < ny; j++) {
+                float ip = fvec_inner_product (x_i, y_j, d);
 
-            if (ip > simi[0]) {
-                minheap_pop (k, simi, idxi);
-                minheap_push (k, simi, idxi, ip, j);
+                if (ip > simi[0]) {
+                    minheap_pop (k, simi, idxi);
+                    minheap_push (k, simi, idxi, ip, j);
+                }
+                y_j += d;
             }
-            y_j += d;
+            minheap_reorder (k, simi, idxi);
         }
-        minheap_reorder (k, simi, idxi);
+        InterruptCallback::check ();
     }
 
 }
@@ -792,25 +460,32 @@ static void knn_L2sqr_sse (
 {
     size_t k = res->k;
 
+    size_t check_period = InterruptCallback::get_period_hint (ny * d);
+
+    for (size_t i0 = 0; i0 < nx; i0 += check_period) {
+        size_t i1 = std::min(i0 + check_period, nx);
+
 #pragma omp parallel for
-    for (size_t i = 0; i < nx; i++) {
-        const float * x_i = x + i * d;
-        const float * y_j = y;
-        size_t j;
-        float * __restrict simi = res->get_val(i);
-        long * __restrict idxi = res->get_ids (i);
+        for (size_t i = i0; i < i1; i++) {
+            const float * x_i = x + i * d;
+            const float * y_j = y;
+            size_t j;
+            float * simi = res->get_val(i);
+            long * idxi = res->get_ids (i);
 
-        maxheap_heapify (k, simi, idxi);
-        for (j = 0; j < ny; j++) {
-            float disij = fvec_L2sqr (x_i, y_j, d);
+            maxheap_heapify (k, simi, idxi);
+            for (j = 0; j < ny; j++) {
+                float disij = fvec_L2sqr (x_i, y_j, d);
 
-            if (disij < simi[0]) {
-                maxheap_pop (k, simi, idxi);
-                maxheap_push (k, simi, idxi, disij, j);
+                if (disij < simi[0]) {
+                    maxheap_pop (k, simi, idxi);
+                    maxheap_push (k, simi, idxi, disij, j);
+                }
+                y_j += d;
             }
-            y_j += d;
+            maxheap_reorder (k, simi, idxi);
         }
-        maxheap_reorder (k, simi, idxi);
+        InterruptCallback::check ();
     }
 
 }
@@ -831,7 +506,7 @@ static void knn_inner_product_blas (
     /* block sizes */
     const size_t bs_x = 4096, bs_y = 1024;
     // const size_t bs_x = 16, bs_y = 16;
-    float *ip_block = new float[bs_x * bs_y];
+    std::unique_ptr<float[]> ip_block(new float[bs_x * bs_y]);
 
     for (size_t i0 = 0; i0 < nx; i0 += bs_x) {
         size_t i1 = i0 + bs_x;
@@ -847,14 +522,14 @@ static void knn_inner_product_blas (
                 sgemm_ ("Transpose", "Not transpose", &nyi, &nxi, &di, &one,
                         y + j0 * d, &di,
                         x + i0 * d, &di, &zero,
-                        ip_block, &nyi);
+                        ip_block.get(), &nyi);
             }
 
             /* collect maxima */
-            res->addn (j1 - j0, ip_block, j0, i0, i1 - i0);
+            res->addn (j1 - j0, ip_block.get(), j0, i0, i1 - i0);
         }
+        InterruptCallback::check ();
     }
-    delete [] ip_block;
     res->reorder ();
 }
 
@@ -878,12 +553,13 @@ static void knn_L2sqr_blas (const float * x,
     const size_t bs_x = 4096, bs_y = 1024;
     // const size_t bs_x = 16, bs_y = 16;
     float *ip_block = new float[bs_x * bs_y];
-
     float *x_norms = new float[nx];
-    fvec_norms_L2sqr (x_norms, x, d, nx);
-
     float *y_norms = new float[ny];
+    ScopeDeleter<float> del1(ip_block), del3(x_norms), del2(y_norms);
+
+    fvec_norms_L2sqr (x_norms, x, d, nx);
     fvec_norms_L2sqr (y_norms, y, d, ny);
+
 
     for (size_t i0 = 0; i0 < nx; i0 += bs_x) {
         size_t i1 = i0 + bs_x;
@@ -913,6 +589,10 @@ static void knn_L2sqr_blas (const float * x,
                     float ip = *ip_line++;
                     float dis = x_norms[i] + y_norms[j] - 2 * ip;
 
+                    // negative values can occur for identical vectors
+                    // due to roundoff errors
+                    if (dis < 0) dis = 0;
+
                     dis = corr (dis, i, j);
 
                     if (dis < simi[0]) {
@@ -922,12 +602,10 @@ static void knn_L2sqr_blas (const float * x,
                 }
             }
         }
+        InterruptCallback::check ();
     }
     res->reorder ();
 
-    delete [] ip_block;
-    delete [] x_norms;
-    delete [] y_norms;
 }
 
 
@@ -1135,13 +813,17 @@ static void range_search_blas (
     const size_t bs_x = 4096, bs_y = 1024;
     // const size_t bs_x = 16, bs_y = 16;
     float *ip_block = new float[bs_x * bs_y];
+    ScopeDeleter<float> del0(ip_block);
 
     float *x_norms = nullptr, *y_norms = nullptr;
-
+    ScopeDeleter<float> del1, del2;
     if (compute_l2) {
         x_norms = new float[nx];
+        del1.set (x_norms);
         fvec_norms_L2sqr (x_norms, x, d, nx);
+
         y_norms = new float[ny];
+        del2.set (y_norms);
         fvec_norms_L2sqr (y_norms, y, d, ny);
     }
 
@@ -1171,8 +853,7 @@ static void range_search_blas (
             for (size_t i = i0; i < i1; i++) {
                 const float *ip_line = ip_block + (i - i0) * (j1 - j0);
 
-                RangeSearchPartialResult::QueryResult & qres =
-                    pres->new_result (i);
+                RangeQueryResult & qres = pres->new_result (i);
 
                 for (size_t j = j0; j < j1; j++) {
                     float ip = *ip_line++;
@@ -1189,11 +870,8 @@ static void range_search_blas (
                 }
             }
         }
-
+        InterruptCallback::check ();
     }
-    delete [] ip_block;
-    delete [] x_norms;
-    delete [] y_norms;
 
     { // merge the partial results
         int npres = partial_results.size();
@@ -1226,36 +904,55 @@ static void range_search_sse (const float * x,
 {
     FAISS_THROW_IF_NOT (d % 4 == 0);
 
+    size_t check_period = InterruptCallback::get_period_hint (ny * d);
+    bool interrupted = false;
+
 #pragma omp parallel
     {
         RangeSearchPartialResult pres (res);
 
+        for (size_t i0 = 0; i0 < nx; i0 += check_period) {
+            size_t i1 = std::min(i0 + check_period, nx);
+
 #pragma omp for
-        for (size_t i = 0; i < nx; i++) {
-            const float * x_ = x + i * d;
-            const float * y_ = y;
-            size_t j;
+            for (size_t i = i0; i < i1; i++) {
+                const float * x_ = x + i * d;
+                const float * y_ = y;
+                size_t j;
 
-            RangeSearchPartialResult::QueryResult & qres =
-                pres.new_result (i);
+                RangeQueryResult & qres = pres.new_result (i);
 
-            for (j = 0; j < ny; j++) {
-                if (compute_l2) {
-                    float disij = fvec_L2sqr (x_, y_, d);
-                    if (disij < radius) {
-                        qres.add (disij, j);
+                for (j = 0; j < ny; j++) {
+                    if (compute_l2) {
+                        float disij = fvec_L2sqr (x_, y_, d);
+                        if (disij < radius) {
+                            qres.add (disij, j);
+                        }
+                    } else {
+                        float ip = fvec_inner_product (x_, y_, d);
+                        if (ip > radius) {
+                            qres.add (ip, j);
+                        }
                     }
-                } else {
-                    float ip = fvec_inner_product (x_, y_, d);
-                    if (ip > radius) {
-                        qres.add (ip, j);
-                    }
+                    y_ += d;
                 }
-                y_ += d;
+
             }
 
+            if (InterruptCallback::is_interrupted ()) {
+                interrupted = true;
+            }
+
+#pragma omp barrier
+            if (interrupted) {
+                break;
+            }
         }
         pres.finalize ();
+    }
+
+    if (interrupted) {
+        FAISS_THROW_MSG ("computation interrupted");
     }
 }
 
@@ -1857,118 +1554,6 @@ void fvec_argsort_parallel (size_t n, const float *vals,
 
 
 
-/***************************************************************************
- * heavily optimized table computations
- ***************************************************************************/
-
-
-static inline void fvec_madd_ref (size_t n, const float *a,
-                           float bf, const float *b, float *c) {
-    for (size_t i = 0; i < n; i++)
-        c[i] = a[i] + bf * b[i];
-}
-
-
-static inline void fvec_madd_sse (size_t n, const float *a,
-                                  float bf, const float *b, float *c) {
-    n >>= 2;
-    __m128 bf4 = _mm_set_ps1 (bf);
-    __m128 * a4 = (__m128*)a;
-    __m128 * b4 = (__m128*)b;
-    __m128 * c4 = (__m128*)c;
-
-    while (n--) {
-        *c4 = _mm_add_ps (*a4, _mm_mul_ps (bf4, *b4));
-        b4++;
-        a4++;
-        c4++;
-    }
-}
-
-void fvec_madd (size_t n, const float *a,
-                       float bf, const float *b, float *c)
-{
-    if ((n & 3) == 0 &&
-        ((((long)a) | ((long)b) | ((long)c)) & 15) == 0)
-        fvec_madd_sse (n, a, bf, b, c);
-    else
-        fvec_madd_ref (n, a, bf, b, c);
-}
-
-static inline int fvec_madd_and_argmin_ref (size_t n, const float *a,
-                                         float bf, const float *b, float *c) {
-    float vmin = 1e20;
-    int imin = -1;
-
-    for (size_t i = 0; i < n; i++) {
-        c[i] = a[i] + bf * b[i];
-        if (c[i] < vmin) {
-            vmin = c[i];
-            imin = i;
-        }
-    }
-    return imin;
-}
-
-static inline int fvec_madd_and_argmin_sse (size_t n, const float *a,
-                                         float bf, const float *b, float *c) {
-    n >>= 2;
-    __m128 bf4 = _mm_set_ps1 (bf);
-    __m128 vmin4 = _mm_set_ps1 (1e20);
-    __m128i imin4 = _mm_set1_epi32 (-1);
-    __m128i idx4 = _mm_set_epi32 (3, 2, 1, 0);
-    __m128i inc4 = _mm_set1_epi32 (4);
-    __m128 * a4 = (__m128*)a;
-    __m128 * b4 = (__m128*)b;
-    __m128 * c4 = (__m128*)c;
-
-    while (n--) {
-        __m128 vc4 = _mm_add_ps (*a4, _mm_mul_ps (bf4, *b4));
-        *c4 = vc4;
-        __m128i mask = (__m128i)_mm_cmpgt_ps (vmin4, vc4);
-        // imin4 = _mm_blendv_epi8 (imin4, idx4, mask); // slower!
-
-        imin4 = _mm_or_si128 (_mm_and_si128 (mask, idx4),
-                              _mm_andnot_si128 (mask, imin4));
-        vmin4 = _mm_min_ps (vmin4, vc4);
-        b4++;
-        a4++;
-        c4++;
-        idx4 = _mm_add_epi32 (idx4, inc4);
-    }
-
-    // 4 values -> 2
-    {
-        idx4 = _mm_shuffle_epi32 (imin4, 3 << 2 | 2);
-        __m128 vc4 = _mm_shuffle_ps (vmin4, vmin4, 3 << 2 | 2);
-        __m128i mask = (__m128i)_mm_cmpgt_ps (vmin4, vc4);
-        imin4 = _mm_or_si128 (_mm_and_si128 (mask, idx4),
-                              _mm_andnot_si128 (mask, imin4));
-        vmin4 = _mm_min_ps (vmin4, vc4);
-    }
-    // 2 values -> 1
-    {
-        idx4 = _mm_shuffle_epi32 (imin4, 1);
-        __m128 vc4 = _mm_shuffle_ps (vmin4, vmin4, 1);
-        __m128i mask = (__m128i)_mm_cmpgt_ps (vmin4, vc4);
-        imin4 = _mm_or_si128 (_mm_and_si128 (mask, idx4),
-                              _mm_andnot_si128 (mask, imin4));
-        // vmin4 = _mm_min_ps (vmin4, vc4);
-    }
-    return  _mm_extract_epi32 (imin4, 0);
-}
-
-
-int fvec_madd_and_argmin (size_t n, const float *a,
-                                 float bf, const float *b, float *c)
-{
-    if ((n & 3) == 0 &&
-        ((((long)a) | ((long)b) | ((long)c)) & 15) == 0)
-        return fvec_madd_and_argmin_sse (n, a, bf, b, c);
-    else
-        return fvec_madd_and_argmin_ref (n, a, bf, b, c);
-}
-
 
 
 const float *fvecs_maybe_subsample (
@@ -1994,5 +1579,76 @@ const float *fvecs_maybe_subsample (
     return x_subset;
 }
 
+
+void binary_to_real(size_t d, const uint8_t *x_in, float *x_out) {
+    for (size_t i = 0; i < d; ++i) {
+        x_out[i] = 2 * ((x_in[i >> 3] >> (i & 7)) & 1) - 1;
+    }
+}
+
+void real_to_binary(size_t d, const float *x_in, uint8_t *x_out) {
+  for (size_t i = 0; i < d / 8; ++i) {
+    uint8_t b = 0;
+    for (int j = 0; j < 8; ++j) {
+      if (x_in[8 * i + j] > 0) {
+        b |= (1 << j);
+      }
+    }
+    x_out[i] = b;
+  }
+}
+
+
+// from Python's stringobject.c
+uint64_t hash_bytes (const uint8_t *bytes, long n) {
+    const uint8_t *p = bytes;
+    uint64_t x = (uint64_t)(*p) << 7;
+    long len = n;
+    while (--len >= 0) {
+        x = (1000003*x) ^ *p++;
+    }
+    x ^= n;
+    return x;
+}
+
+
+bool check_openmp() {
+  omp_set_num_threads(10);
+
+  if (omp_get_max_threads() != 10) {
+    return false;
+  }
+
+  std::vector<int> nt_per_thread(10);
+  size_t sum = 0;
+  bool in_parallel = true;
+#pragma omp parallel reduction(+: sum)
+  {
+    if (!omp_in_parallel()) {
+      in_parallel = false;
+    }
+
+    int nt = omp_get_num_threads();
+    int rank = omp_get_thread_num();
+
+    nt_per_thread[rank] = nt;
+#pragma omp for
+    for(int i = 0; i < 1000 * 1000 * 10; i++) {
+      sum += i;
+    }
+  }
+
+  if (!in_parallel) {
+    return false;
+  }
+  if (nt_per_thread[0] != 10) {
+    return false;
+  }
+  if (sum == 0) {
+    return false;
+  }
+
+  return true;
+}
 
 } // namespace faiss

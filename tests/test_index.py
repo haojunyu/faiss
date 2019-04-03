@@ -13,32 +13,17 @@ import unittest
 import faiss
 import tempfile
 import os
+import re
 
 
-def get_dataset(d, nb, nt, nq):
-    rs = np.random.RandomState(123)
-    xb = rs.rand(nb, d).astype('float32')
-    xt = rs.rand(nt, d).astype('float32')
-    xq = rs.rand(nq, d).astype('float32')
+from common import get_dataset, get_dataset_2
 
-    return (xt, xb, xq)
+class TestModuleInterface(unittest.TestCase):
 
+    def test_version_attribute(self):
+        assert hasattr(faiss, '__version__')
+        assert re.match('^\\d+\\.\\d+\\.\\d+$', faiss.__version__)
 
-def get_dataset_2(d, nb, nt, nq):
-    """A dataset that is not completely random but still challenging to
-    index
-    """
-    d1 = 10     # intrinsic dimension (more or less)
-    n = nb + nt + nq
-    rs = np.random.RandomState(1234)
-    x = rs.normal(size=(n, d1))
-    x = np.dot(x, rs.rand(d1, d))
-    # now we have a d1-dim ellipsoid in d-dimensional space
-    # higher factor (>4) -> higher frequency -> less linear
-    x = x * (rs.rand(d) * 4 + 0.1)
-    x = np.sin(x)
-    x = x.astype('float32')
-    return x[:nt], x[nt:-nq], x[-nq:]
 
 
 class EvalIVFPQAccuracy(unittest.TestCase):
@@ -267,9 +252,7 @@ class TestScalarQuantizer(unittest.TestCase):
             index = faiss.IndexScalarQuantizer(d, qtype, faiss.METRIC_L2)
             index.train(xt)
             index.add(xb)
-
             D, I = index.search(xq, 10)
-
             nok[qname] = (I[:, 0] == I_ref[:, 0]).sum()
 
         print(nok, nq)
@@ -451,6 +434,18 @@ class TestHNSW(unittest.TestCase):
 
         self.io_and_retest(index, Dhnsw, Ihnsw)
 
+    def test_hnsw_unbounded_queue(self):
+        d = self.xq.shape[1]
+
+        index = faiss.IndexHNSWFlat(d, 16)
+        index.add(self.xb)
+        index.search_bounded_queue = False
+        Dhnsw, Ihnsw = index.search(self.xq, 1)
+
+        self.assertGreaterEqual((self.Iref == Ihnsw).sum(), 460)
+
+        self.io_and_retest(index, Dhnsw, Ihnsw)
+
     def io_and_retest(self, index, Dhnsw, Ihnsw):
         _, tmpfile = tempfile.mkstemp()
         try:
@@ -478,6 +473,93 @@ class TestHNSW(unittest.TestCase):
         self.assertGreaterEqual((self.Iref == Ihnsw).sum(), 310)
 
         self.io_and_retest(index, Dhnsw, Ihnsw)
+
+    def test_add_0_vecs(self):
+        index = faiss.IndexHNSWFlat(10, 16)
+        zero_vecs = np.zeros((0, 10), dtype='float32')
+        # infinite loop
+        index.add(zero_vecs)
+
+
+class TestIOError(unittest.TestCase):
+
+    def test_io_error(self):
+        d, n = 32, 1000
+        x = np.random.uniform(size=(n, d)).astype('float32')
+        index = faiss.IndexFlatL2(d)
+        index.add(x)
+        _, fname = tempfile.mkstemp()
+        try:
+            faiss.write_index(index, fname)
+
+            # should be fine
+            faiss.read_index(fname)
+
+            # now damage file
+            data = open(fname, 'rb').read()
+            data = data[:int(len(data) / 2)]
+            open(fname, 'wb').write(data)
+
+            # should make a nice readable exception that mentions the
+            try:
+                faiss.read_index(fname)
+            except RuntimeError as e:
+                if fname not in str(e):
+                    raise
+            else:
+                raise
+
+        finally:
+            if os.path.exists(fname):
+                os.unlink(fname)
+
+
+class TestDistancesPositive(unittest.TestCase):
+
+    def test_l2_pos(self):
+        """
+        roundoff errors occur only with the L2 decomposition used
+        with BLAS, ie. in IndexFlatL2 and with
+        n > distance_compute_blas_threshold = 20
+        """
+
+        d = 128
+        n = 100
+
+        rs = np.random.RandomState(1234)
+        x = rs.rand(n, d).astype('float32')
+
+        index = faiss.IndexFlatL2(d)
+        index.add(x)
+
+        D, I = index.search(x, 10)
+
+        assert np.all(D >= 0)
+
+
+class TestReconsException(unittest.TestCase):
+
+    def test_recons(self):
+
+        d = 64                           # dimension
+        nb = 1000
+        rs = np.random.RandomState(1234)
+        xb = rs.rand(nb, d).astype('float32')
+        nlist = 10
+        quantizer = faiss.IndexFlatL2(d)  # the other index
+        index = faiss.IndexIVFFlat(quantizer, d, nlist)
+        index.train(xb)
+        index.add(xb)
+        index.make_direct_map()
+
+        index.reconstruct(9)
+
+        try:
+            index.reconstruct(100001)
+        except RuntimeError:
+            pass
+        else:
+            assert False, "should raise an exception"
 
 
 

@@ -16,6 +16,7 @@
 
 
 #include "Index.h"
+#include "InvertedLists.h"
 #include "Clustering.h"
 #include "Heap.h"
 
@@ -56,97 +57,16 @@ struct Level1Quantizer {
 };
 
 
-/** Table of inverted lists
- * multithreading rules:
- * - concurrent read accesses are allowed
- * - concurrent update accesses are allowed
- * - for resize and add_entries, only concurrent access to different lists
- *   are allowed
- */
-struct InvertedLists {
-    typedef Index::idx_t idx_t;
-
-    size_t nlist;             ///< number of possible key values
-    size_t code_size;         ///< code size per vector in bytes
-
-    InvertedLists (size_t nlist, size_t code_size);
-
-    /*************************
-     *  Read only functions */
-
-    /// get the size of a list
-    virtual size_t list_size(size_t list_no) const = 0;
-
-    /// @return codes    size list_size * code_size
-    virtual const uint8_t * get_codes (size_t list_no) const = 0;
-
-    /// @return ids      size list_size
-    virtual const idx_t * get_ids (size_t list_no) const = 0;
-
-    /// @return a single id in an inverted list
-    virtual idx_t get_single_id (size_t list_no, size_t offset) const;
-
-    /// @return a single code in an inverted list
-    virtual const uint8_t * get_single_code (
-                size_t list_no, size_t offset) const;
-
-    /// prepare the following lists (default does nothing)
-    /// a list can be -1 hence the signed long
-    virtual void prefetch_lists (const long *list_nos, int nlist) const;
-
-    /*************************
-     * writing functions */
-
-    /// add one entry to an inverted list
-    virtual size_t add_entry (size_t list_no, idx_t theid,
-                              const uint8_t *code);
-
-    virtual size_t add_entries (
-           size_t list_no, size_t n_entry,
-           const idx_t* ids, const uint8_t *code) = 0;
-
-    virtual void update_entry (size_t list_no, size_t offset,
-                               idx_t id, const uint8_t *code);
-
-    virtual void update_entries (size_t list_no, size_t offset, size_t n_entry,
-                                 const idx_t *ids, const uint8_t *code) = 0;
-
-    virtual void resize (size_t list_no, size_t new_size) = 0;
-
-    virtual void reset ();
-
-    virtual ~InvertedLists ();
-};
-
-
-struct ArrayInvertedLists: InvertedLists {
-    std::vector < std::vector<uint8_t> > codes; // binary codes, size nlist
-    std::vector < std::vector<idx_t> > ids;  ///< Inverted lists for indexes
-
-    ArrayInvertedLists (size_t nlist, size_t code_size);
-
-    size_t list_size(size_t list_no) const override;
-    const uint8_t * get_codes (size_t list_no) const override;
-    const idx_t * get_ids (size_t list_no) const override;
-
-    size_t add_entries (
-           size_t list_no, size_t n_entry,
-           const idx_t* ids, const uint8_t *code) override;
-
-    void update_entries (size_t list_no, size_t offset, size_t n_entry,
-                         const idx_t *ids, const uint8_t *code) override;
-
-    void resize (size_t list_no, size_t new_size) override;
-
-    virtual ~ArrayInvertedLists ();
-};
-
 
 struct IVFSearchParameters {
     size_t nprobe;            ///< number of probes at query time
     size_t max_codes;         ///< max nb of codes to visit to do a query
     virtual ~IVFSearchParameters () {}
 };
+
+
+
+struct InvertedListScanner;
 
 /** Index based on a inverted file (IVF)
  *
@@ -196,8 +116,18 @@ struct IndexIVF: Index, Level1Quantizer {
     /// Trains the quantizer and calls train_residual to train sub-quantizers
     void train(idx_t n, const float* x) override;
 
-    /// Quantizes x and calls add_with_key
+    /// Calls add_with_ids with NULL ids
     void add(idx_t n, const float* x) override;
+
+    /** Encodes a set of vectors as they would appear in the inverted lists
+     *
+     * @param list_nos   inverted list ids as returned by the
+     *                   quantizer (size n). -1s are ignored.
+     * @param codes      output codes, size n * code_size
+     */
+    virtual void encode_vectors(idx_t n, const float* x,
+                                const idx_t *list_nos,
+                                uint8_t * codes) const = 0;
 
     /// Sub-classes that encode the residuals can train their encoders here
     /// does nothing by default
@@ -205,7 +135,8 @@ struct IndexIVF: Index, Level1Quantizer {
 
     /** search a set of vectors, that are pre-quantized by the IVF
      *  quantizer. Fill in the corresponding heaps with the query
-     *  results. search() calls this.
+     *  results. The default implementation uses InvertedListScanners
+     *  to do the search.
      *
      * @param n      nb of vectors to query
      * @param x      query vectors, size nx * d
@@ -226,11 +157,18 @@ struct IndexIVF: Index, Level1Quantizer {
                                      float *distances, idx_t *labels,
                                      bool store_pairs,
                                      const IVFSearchParameters *params=nullptr
-                                     ) const = 0;
+                                     ) const;
 
     /** assign the vectors, then call search_preassign */
-    virtual void search (idx_t n, const float *x, idx_t k,
-                         float *distances, idx_t *labels) const override;
+    void search (idx_t n, const float *x, idx_t k,
+                 float *distances, idx_t *labels) const override;
+
+    void range_search (idx_t n, const float* x, float radius,
+                       RangeSearchResult* result) const override;
+
+    /// get a scanner for this index (store_pairs means ignore labels)
+    virtual InvertedListScanner *get_InvertedListScanner (
+        bool store_pairs=false) const;
 
     void reconstruct (idx_t key, float* recons) const override;
 
@@ -273,6 +211,11 @@ struct IndexIVF: Index, Level1Quantizer {
 
     long remove_ids(const IDSelector& sel) override;
 
+    /** check that the two indexes are compatible (ie, they are
+     * trained in the same way and have the same
+     * parameters). Otherwise throw. */
+    void check_compatible_for_merge (const IndexIVF &other) const;
+
     /** moves the entries from another dataset to self. On output,
      * other is empty. add_id is added to all moved ids (for
      * sequential ids, this would be this->ntotal */
@@ -300,15 +243,60 @@ struct IndexIVF: Index, Level1Quantizer {
      */
     void make_direct_map (bool new_maintain_direct_map=true);
 
-    /// 1= perfectly balanced, >1: imbalanced
-    double imbalance_factor () const;
-
-    /// display some stats about the inverted lists
-    void print_stats () const;
-
+    /// replace the inverted lists, old one is deallocated if own_invlists
     void replace_invlists (InvertedLists *il, bool own=false);
 
     IndexIVF ();
+};
+
+class RangeQueryResult;
+
+/** Object that handles a query. The inverted lists to scan are
+ * provided externally. The object has a lot of state, but
+ * distance_to_code and scan_codes can be called in multiple
+ * threads */
+struct InvertedListScanner {
+
+    using idx_t = Index::idx_t;
+
+    /// from now on we handle this query.
+    virtual void set_query (const float *query_vector) = 0;
+
+    /// following codes come from this inverted list
+    virtual void set_list (idx_t list_no, float coarse_dis) = 0;
+
+    /// compute a single query-to-code distance
+    virtual float distance_to_code (const uint8_t *code) const = 0;
+
+    /** scan a set of codes, compute distances to current query and
+     * update heap of results if necessary.
+     *
+     * @param n      number of codes to scan
+     * @param codes  codes to scan (n * code_size)
+     * @param ids        corresponding ids (ignored if store_pairs)
+     * @param distances  heap distances (size k)
+     * @param labels     heap labels (size k)
+     * @param k          heap size
+     * @return number of heap updates performed
+     */
+    virtual size_t scan_codes (size_t n,
+                               const uint8_t *codes,
+                               const idx_t *ids,
+                               float *distances, idx_t *labels,
+                               size_t k) const = 0;
+
+    /** scan a set of codes, compute distances to current query and
+     * update results if distances are below radius
+     *
+     * (default implementation fails) */
+    virtual void scan_codes_range (size_t n,
+                                   const uint8_t *codes,
+                                   const idx_t *ids,
+                                   float radius,
+                                   RangeQueryResult &result) const;
+
+    virtual ~InvertedListScanner () {}
+
 };
 
 
@@ -316,6 +304,9 @@ struct IndexIVFStats {
     size_t nq;       // nb of queries run
     size_t nlist;    // nb of inverted lists scanned
     size_t ndis;     // nb of distancs computed
+    size_t nheap_updates; // nb of times the heap was updated
+    double quantization_time; // time spent quantizing vectors (in ms)
+    double search_time;       // time spent searching lists (in ms)
 
     IndexIVFStats () {reset (); }
     void reset ();

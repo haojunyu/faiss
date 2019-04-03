@@ -796,7 +796,7 @@ struct MinSumK {
             // enqueue followers
             long ii = ti;
             for (int m = 0; m < M; m++) {
-                long n = ii & ((1 << nbit) - 1);
+                long n = ii & ((1L << nbit) - 1);
                 ii >>= nbit;
                 if (n + 1 >= N) continue;
 
@@ -819,8 +819,8 @@ struct MinSumK {
             }
             long ti = 0;
             for (int m = 0; m < M; m++) {
-                long n = ii & ((1 << nbit) - 1);
-                ti += ssx[m].get_ord(n) << (nbit * m);
+                long n = ii & ((1L << nbit) - 1);
+                ti += long(ssx[m].get_ord(n)) << (nbit * m);
                 ii >>= nbit;
             }
             terms[k] = ti;
@@ -869,6 +869,22 @@ void MultiIndexQuantizer::train(idx_t n, const float *x)
 void MultiIndexQuantizer::search (idx_t n, const float *x, idx_t k,
                                   float *distances, idx_t *labels) const {
     if (n == 0) return;
+
+    // the allocation just below can be severe...
+    idx_t bs = 32768;
+    if (n > bs) {
+        for (idx_t i0 = 0; i0 < n; i0 += bs) {
+            idx_t i1 = std::min(i0 + bs, n);
+            if (verbose) {
+                printf("MultiIndexQuantizer::search: %ld:%ld / %ld\n",
+                       i0, i1, n);
+            }
+            search (i1 - i0, x + i0 * d, k,
+                    distances + i0 * k,
+                    labels + i0 * k);
+        }
+        return;
+    }
 
     float * dis_tables = new float [n * pq.ksub * pq.M];
     ScopeDeleter<float> del (dis_tables);

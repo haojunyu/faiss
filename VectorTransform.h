@@ -122,6 +122,9 @@ struct RandomRotationMatrix: LinearTransform {
      /// must be called before the transform is used
      void init(int seed);
 
+     // intializes with an arbitrary seed
+     void train(Index::idx_t n, const float* x) override;
+
      RandomRotationMatrix () {}
 };
 
@@ -134,7 +137,7 @@ struct PCAMatrix: LinearTransform {
      * eigenvalues^eigen_power
      *
      * =0: no whitening
-     * =-2: full whitening
+     * =-0.5: full whitening
      */
     float eigen_power;
 
@@ -243,6 +246,25 @@ struct NormalizationTransform: VectorTransform {
     void reverse_transform(idx_t n, const float* xt, float* x) const override;
 };
 
+/** Subtract the mean of each component from the vectors. */
+struct CenteringTransform: VectorTransform {
+
+    /// Mean, size d_in = d_out
+    std::vector<float> mean;
+
+    explicit CenteringTransform (int d = 0);
+
+    /// train on n vectors.
+    void train(Index::idx_t n, const float* x) override;
+
+    /// subtract the mean
+    void apply_noalloc(idx_t n, const float* x, float* xt) const override;
+
+    /// add the mean
+    void reverse_transform (idx_t n, const float * xt,
+                            float *x) const override;
+
+};
 
 
 /** Index that applies a LinearTransform transform on vectors before
@@ -281,6 +303,12 @@ struct IndexPreTransform: Index {
         idx_t k,
         float* distances,
         idx_t* labels) const override;
+
+
+    /* range search, no attempt is done to change the radius */
+    void range_search (idx_t n, const float* x, float radius,
+                       RangeSearchResult* result) const override;
+
 
     void reconstruct (idx_t key, float * recons) const override;
 

@@ -14,6 +14,10 @@
 
 #include "AutoTune.h"
 
+#include <cmath>
+#include <stdarg.h>     /* va_list, va_start, va_arg, va_end */
+
+
 #include "FaissAssert.h"
 #include "utils.h"
 
@@ -28,6 +32,7 @@
 #include "IndexScalarQuantizer.h"
 #include "IndexHNSW.h"
 #include "IndexBinaryFlat.h"
+#include "IndexBinaryHNSW.h"
 #include "IndexBinaryIVF.h"
 
 namespace faiss {
@@ -253,7 +258,8 @@ void OperatingPoints::display (bool only_optimal) const
 
 ParameterSpace::ParameterSpace ():
     verbose (1), n_experiments (500),
-    batchsize (1<<30), thread_over_batches (false)
+    batchsize (1<<30), thread_over_batches (false),
+    min_test_duration (0)
 {
 }
 
@@ -265,6 +271,7 @@ ParameterSpace::ParameterSpace ():
 ParameterSpace::ParameterSpace (Index *index):
     verbose (1), n_experiments (500),
     batchsize (1<<30), thread_over_batches (false)
+
 {
     initialize(index);
 }
@@ -387,7 +394,9 @@ void ParameterSpace::initialize (const Index * index)
             for (int i = 8; i < 20; i++) {
                 pr_max_codes.values.push_back (1 << i);
             }
-            pr_max_codes.values.push_back (1.0 / 0.0);
+            pr_max_codes.values.push_back (
+                std::numeric_limits<double>::infinity()
+            );
         }
     }
     if (DC (IndexIVFPQR)) {
@@ -481,7 +490,10 @@ void ParameterSpace::set_index_parameter (
     }
 
     if (name == "nprobe") {
-        if ( DC(IndexIVF)) {
+        if (DC (IndexIDMap)) {
+            set_index_parameter (ix->index, name, val);
+            return;
+        } else if (DC (IndexIVF)) {
             ix->nprobe = int(val);
             return;
         }
@@ -514,10 +526,25 @@ void ParameterSpace::set_index_parameter (
     }
     if (name == "max_codes") {
         if (DC (IndexIVF)) {
-            ix->max_codes = finite(val) ? size_t(val) : 0;
+            ix->max_codes = std::isfinite(val) ? size_t(val) : 0;
             return;
         }
     }
+
+    if (name == "efSearch") {
+        if (DC (IndexHNSW)) {
+            ix->hnsw.efSearch = int(val);
+            return;
+        }
+        if (DC (IndexIVF)) {
+            if (IndexHNSW *cq =
+                dynamic_cast<IndexHNSW *>(ix->quantizer)) {
+                cq->hnsw.efSearch = int(val);
+                return;
+            }
+        }
+    }
+
     FAISS_THROW_FMT ("ParameterSpace::set_index_parameter:"
                      "could not set parameter %s",
                      name.c_str());
@@ -629,35 +656,45 @@ void ParameterSpace::explore (Index *index,
 
         double t0 = getmillisecs ();
 
-        if (thread_over_batches) {
-#pragma omp parallel for
-            for (size_t q0 = 0; q0 < nq; q0 += batchsize) {
-                size_t q1 = q0 + batchsize;
-                if (q1 > nq) q1 = nq;
-                index->search (q1 - q0, xq + q0 * index->d,
-                               crit.nnn,
-                               D.data() + q0 * crit.nnn,
-                               I.data() + q0 * crit.nnn);
-            }
-        } else {
-            for (size_t q0 = 0; q0 < nq; q0 += batchsize) {
-                size_t q1 = q0 + batchsize;
-                if (q1 > nq) q1 = nq;
-                index->search (q1 - q0, xq + q0 * index->d,
-                               crit.nnn,
-                               D.data() + q0 * crit.nnn,
-                               I.data() + q0 * crit.nnn);
-            }
-        }
+        int nrun = 0;
+        double t_search;
 
-        double t_search = (getmillisecs() - t0) / 1e3;
+        do {
+
+            if (thread_over_batches) {
+#pragma omp parallel for
+                for (size_t q0 = 0; q0 < nq; q0 += batchsize) {
+                    size_t q1 = q0 + batchsize;
+                    if (q1 > nq) q1 = nq;
+                    index->search (q1 - q0, xq + q0 * index->d,
+                                   crit.nnn,
+                                   D.data() + q0 * crit.nnn,
+                                   I.data() + q0 * crit.nnn);
+                }
+            } else {
+                for (size_t q0 = 0; q0 < nq; q0 += batchsize) {
+                    size_t q1 = q0 + batchsize;
+                    if (q1 > nq) q1 = nq;
+                    index->search (q1 - q0, xq + q0 * index->d,
+                                   crit.nnn,
+                                   D.data() + q0 * crit.nnn,
+                                   I.data() + q0 * crit.nnn);
+                }
+            }
+            nrun ++;
+            t_search = (getmillisecs() - t0) / 1e3;
+
+        } while (t_search < min_test_duration);
+
+        t_search /= nrun;
 
         double perf = crit.evaluate (D.data(), I.data());
 
         bool keep = ops->add (perf, t_search, combination_name (cno), cno);
 
         if (verbose)
-            printf(" perf %.3f t %.3f %s\n", perf, t_search,
+            printf(" perf %.3f t %.3f (%d runs) %s\n",
+                   perf, t_search, nrun,
                    keep ? "*" : "");
     }
 }
@@ -682,6 +719,7 @@ struct VTChain {
 char get_trains_alone(const Index *coarse_quantizer) {
     return
         dynamic_cast<const MultiIndexQuantizer*>(coarse_quantizer) ? 1 :
+        dynamic_cast<const IndexHNSWFlat*>(coarse_quantizer) ? 2 :
         0;
 }
 
@@ -724,6 +762,9 @@ Index *index_factory (int d, const char *description_in, MetricType metric)
         } else if (sscanf (tok, "PCAR%d", &d_out) == 1) {
             vt_1 = new PCAMatrix (d, d_out, 0, true);
             d = d_out;
+        } else if (sscanf (tok, "RR%d", &d_out) == 1) {
+            vt_1 = new RandomRotationMatrix (d, d_out);
+            d = d_out;
         } else if (sscanf (tok, "PCAW%d", &d_out) == 1) {
             vt_1 = new PCAMatrix (d, d_out, -0.5, false);
             d = d_out;
@@ -738,6 +779,11 @@ Index *index_factory (int d, const char *description_in, MetricType metric)
         } else if (stok == "L2norm") {
             vt_1 = new NormalizationTransform (d, 2.0);
 
+        // coarse quantizers
+        } else if (!coarse_quantizer &&
+                   sscanf (tok, "IVF%d_HNSW%d", &ncentroids, &M) == 2) {
+            FAISS_THROW_IF_NOT (metric == METRIC_L2);
+            coarse_quantizer_1 = new IndexHNSWFlat (d, M);
 
         } else if (!coarse_quantizer &&
                    sscanf (tok, "IVF%d", &ncentroids) == 1) {
@@ -917,15 +963,29 @@ IndexBinary *index_binary_factory(int d, const char *description)
     IndexBinary *index = nullptr;
 
     int ncentroids = -1;
+    int M;
 
-    if (sscanf(description, "BIVF%d", &ncentroids) == 1) {
+    if (sscanf(description, "BIVF%d_HNSW%d", &ncentroids, &M) == 2) {
+        IndexBinaryIVF *index_ivf = new IndexBinaryIVF(
+            new IndexBinaryHNSW(d, M), d, ncentroids
+        );
+        index_ivf->own_fields = true;
+        index = index_ivf;
+
+    } else if (sscanf(description, "BIVF%d", &ncentroids) == 1) {
         IndexBinaryIVF *index_ivf = new IndexBinaryIVF(
             new IndexBinaryFlat(d), d, ncentroids
         );
         index_ivf->own_fields = true;
         index = index_ivf;
+
+    } else if (sscanf(description, "BHNSW%d", &M) == 1) {
+        IndexBinaryHNSW *index_hnsw = new IndexBinaryHNSW(d, M);
+        index = index_hnsw;
+
     } else if (std::string(description) == "BFlat") {
         index = new IndexBinaryFlat(d);
+
     } else {
         FAISS_THROW_IF_NOT_FMT(index, "descrption %s did not generate an index",
                                description);
@@ -933,6 +993,236 @@ IndexBinary *index_binary_factory(int d, const char *description)
 
     return index;
 }
+
+/*********************************************************************
+ * MatrixStats
+ *********************************************************************/
+
+MatrixStats::PerDimStats::PerDimStats():
+    n(0), n_nan(0), n_inf(0), n0(0),
+    min(HUGE_VALF), max(-HUGE_VALF),
+    sum(0), sum2(0),
+    mean(NAN), stddev(NAN)
+{}
+
+
+void MatrixStats::PerDimStats::add (float x)
+{
+    n++;
+    if (std::isnan(x)) {
+        n_nan++;
+        return;
+    }
+    if (!std::isfinite(x)) {
+        n_inf++;
+        return;
+    }
+    if (x == 0) n0++;
+    if (x < min) min = x;
+    if (x > max) max = x;
+    sum += x;
+    sum2 += (double)x * (double)x;
+}
+
+void MatrixStats::PerDimStats::compute_mean_std ()
+{
+    n_valid = n - n_nan - n_inf;
+    mean = sum / n_valid;
+    double var = sum2 / n_valid - mean * mean;
+    if (var < 0) var = 0;
+    stddev = sqrt(var);
+}
+
+
+void MatrixStats::do_comment (const char *fmt, ...)
+{
+    va_list ap;
+
+    /* Determine required size */
+    va_start(ap, fmt);
+    size_t size = vsnprintf(buf, nbuf, fmt, ap);
+    va_end(ap);
+
+    nbuf -= size;
+    buf += size;
+}
+
+
+
+MatrixStats::MatrixStats (size_t n, size_t d, const float *x):
+    n(n), d(d),
+    n_collision(0), n_valid(0), n0(0),
+    min_norm2(HUGE_VAL), max_norm2(0)
+{
+    std::vector<char> comment_buf (10000);
+    buf = comment_buf.data ();
+    nbuf = comment_buf.size();
+
+    do_comment ("analyzing %ld vectors of size %ld\n", n, d);
+
+    if (d > 1024) {
+        do_comment (
+           "indexing this many dimensions is hard, "
+           "please consider dimensionality reducution (with PCAMatrix)\n");
+    }
+
+    size_t nbytes = sizeof (x[0]) * d;
+    per_dim_stats.resize (d);
+
+    for (size_t i = 0; i < n; i++) {
+        const float *xi = x + d * i;
+        double sum2 = 0;
+        for (size_t j = 0; j < d; j++) {
+            per_dim_stats[j].add (xi[j]);
+            sum2 += xi[j] * (double)xi[j];
+        }
+
+        if (std::isfinite (sum2)) {
+            n_valid++;
+            if (sum2 == 0) {
+                n0 ++;
+            } else {
+                if (sum2 < min_norm2) min_norm2 = sum2;
+                if (sum2 > max_norm2) max_norm2 = sum2;
+            }
+        }
+
+        { // check hash
+            uint64_t hash = hash_bytes((const uint8_t*)xi, nbytes);
+            auto elt = occurrences.find (hash);
+            if (elt == occurrences.end()) {
+                Occurrence occ = {i, 1};
+                occurrences[hash] = occ;
+            } else {
+                if (!memcmp (xi, x + elt->second.first * d, nbytes)) {
+                    elt->second.count ++;
+                } else {
+                    n_collision ++;
+                    // we should use a list of collisions but overkill
+                }
+            }
+        }
+    }
+
+    // invalid vecor stats
+    if (n_valid == n) {
+        do_comment ("no NaN or Infs in data\n");
+    } else {
+        do_comment ("%ld vectors contain NaN or Inf "
+                 "(or have too large components), "
+                 "expect bad results with indexing!\n", n - n_valid);
+    }
+
+    // copies in dataset
+    if (occurrences.size() == n) {
+        do_comment ("all vectors are distinct\n");
+    } else {
+        do_comment ("%ld vectors are distinct (%.2f%%)\n",
+                 occurrences.size(),
+                 occurrences.size() * 100.0 / n);
+
+        if (n_collision > 0) {
+            do_comment ("%ld collisions in hash table, "
+                     "counts may be invalid\n", n_collision);
+        }
+
+        Occurrence max = {0, 0};
+        for (auto it = occurrences.begin();
+             it != occurrences.end(); ++it) {
+            if (it->second.count > max.count) {
+                max = it->second;
+            }
+        }
+        do_comment ("vector %ld has %ld copies\n", max.first, max.count);
+    }
+
+    { // norm stats
+        min_norm2 = sqrt (min_norm2);
+        max_norm2 = sqrt (max_norm2);
+        do_comment ("range of L2 norms=[%g, %g] (%ld null vectors)\n",
+                 min_norm2, max_norm2, n0);
+
+        if (max_norm2 < min_norm2 * 1.0001) {
+            do_comment ("vectors are normalized, inner product and "
+                     "L2  search are equivalent\n");
+        }
+
+        if (max_norm2 > min_norm2 * 100) {
+            do_comment ("vectors have very large differences in norms, "
+                     "is this normal?\n");
+        }
+    }
+
+    { // per dimension stats
+
+        double max_std = 0, min_std = HUGE_VAL;
+
+        size_t n_dangerous_range = 0, n_0_range = 0, n0 = 0;
+
+        for (size_t j = 0; j < d; j++) {
+            PerDimStats &st = per_dim_stats[j];
+            st.compute_mean_std ();
+            n0 += st.n0;
+
+            if (st.max == st.min) {
+                n_0_range ++;
+            } else if (st.max < 1.001 * st.min) {
+                n_dangerous_range ++;
+            }
+
+            if (st.stddev > max_std) max_std = st.stddev;
+            if (st.stddev < min_std) min_std = st.stddev;
+        }
+
+
+
+        if (n0 == 0) {
+            do_comment ("matrix contains no 0s\n");
+        } else {
+            do_comment ("matrix contains %.2f %% 0 entries\n",
+                     n0 * 100.0 / (n * d));
+        }
+
+        if (n_0_range == 0) {
+            do_comment ("no constant dimensions\n");
+        } else {
+            do_comment ("%ld dimensions are constant: they can be removed\n",
+                     n_0_range);
+        }
+
+        if (n_dangerous_range == 0) {
+            do_comment ("no dimension has a too large mean\n");
+        } else {
+            do_comment ("%ld dimensions are too large "
+                     "wrt. their variance, may loose precision "
+                     "in IndexFlatL2 (use CenteringTransform)\n",
+                     n_dangerous_range);
+        }
+
+        do_comment ("stddevs per dimension are in [%g %g]\n", min_std, max_std);
+
+        size_t n_small_var = 0;
+
+        for (size_t j = 0; j < d; j++) {
+            const PerDimStats &st = per_dim_stats[j];
+            if (st.stddev < max_std * 1e-4) {
+                n_small_var++;
+            }
+        }
+
+        if (n_small_var > 0) {
+            do_comment ("%ld dimensions have negligible stddev wrt. "
+                     "the largest dimension, they could be ignored",
+                     n_small_var);
+        }
+
+    }
+    comments = comment_buf.data ();
+    buf = nullptr;
+    nbuf = 0;
+}
+
+
 
 
 } // namespace faiss

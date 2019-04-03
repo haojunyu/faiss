@@ -12,25 +12,10 @@ import numpy as np
 import unittest
 import faiss
 import os
+import shutil
 import tempfile
 
-def get_dataset_2(d, nb, nt, nq):
-    """A dataset that is not completely random but still challenging to
-    index
-    """
-    d1 = 10     # intrinsic dimension (more or less)
-    n = nb + nt + nq
-    rs = np.random.RandomState(1234)
-    x = rs.normal(size=(n, d1))
-    x = np.dot(x, rs.rand(d1, d))
-    # now we have a d1-dim ellipsoid in d-dimensional space
-    # higher factor (>4) -> higher frequency -> less linear
-    x = x * (rs.rand(d) * 4 + 0.1)
-    x = np.sin(x)
-    x = x.astype('float32')
-    return x[:nt], x[nt:-nq], x[-nq:]
-
-
+from common import get_dataset_2
 
 class TestRemove(unittest.TestCase):
 
@@ -316,9 +301,7 @@ class TestRareIO(unittest.TestCase):
 
         if in_pretransform:
             # make sure it still works when wrapped in an IndexPreTransform
-            tmp = index1
             index1 = faiss.IndexPreTransform(index1)
-            index1.dont_dealloc_me = tmp
 
         index1.train(xt)
         index1.add(xb)
@@ -461,6 +444,56 @@ class TestSerialize(unittest.TestCase):
         Dnew, Inew = index3.search(xq, 5)
         assert np.all(Dnew == Dref) and np.all(Inew == Iref)
 
+
+class TestRenameOndisk(unittest.TestCase):
+
+    def test_rename(self):
+        d = 10
+        nb = 500
+        nq = 100
+        nt = 100
+
+        xt, xb, xq = get_dataset_2(d, nb, nt, nq)
+
+        quantizer = faiss.IndexFlatL2(d)
+
+        index1 = faiss.IndexIVFFlat(quantizer, d, 20)
+        index1.train(xt)
+
+        dirname = tempfile.mkdtemp()
+
+        try:
+
+            # make an index with ondisk invlists
+            invlists = faiss.OnDiskInvertedLists(
+                index1.nlist, index1.code_size,
+                dirname + '/aa.ondisk')
+            index1.replace_invlists(invlists)
+            index1.add(xb)
+            D1, I1 = index1.search(xq, 10)
+            faiss.write_index(index1, dirname + '/aa.ivf')
+
+            # move the index elsewhere
+            os.mkdir(dirname + '/1')
+            for fname in 'aa.ondisk', 'aa.ivf':
+                os.rename(dirname + '/' + fname,
+                          dirname + '/1/' + fname)
+
+            # try to read it: fails!
+            try:
+                index2 = faiss.read_index(dirname + '/1/aa.ivf')
+            except RuntimeError:
+                pass   # normal
+            else:
+                assert False
+
+            # read it with magic flag
+            index2 = faiss.read_index(dirname + '/1/aa.ivf', faiss.IO_FLAG_ONDISK_SAME_DIR)
+            D2, I2 = index2.search(xq, 10)
+            assert np.all(I1 == I2)
+
+        finally:
+            shutil.rmtree(dirname)
 
 
 if __name__ == '__main__':

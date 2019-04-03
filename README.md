@@ -4,6 +4,12 @@ Faiss is a library for efficient similarity search and clustering of dense vecto
 
 ## NEWS
 
+*NEW: version 1.5.0 (2018-12-19) GPU binary flat index and binary HNSW index*
+
+*NEW: version 1.4.0 (2018-08-30) no more crashes in pure Python code*
+
+*NEW: version 1.3.0 (2018-07-12) support for binary indexes*
+
 *NEW: latest commit (2018-02-22) supports on-disk storage of inverted indexes, see demos/demo_ondisk_ivf.py*
 
 *NEW: latest commit (2018-01-09) includes an implementation of the HNSW indexing method, see benchs/bench_hnsw.py*
@@ -42,7 +48,8 @@ The following are entry points for documentation:
 
 - the full documentation, including a [tutorial](https://github.com/facebookresearch/faiss/wiki/Getting-started), a [FAQ](https://github.com/facebookresearch/faiss/wiki/FAQ) and a [troubleshooting section](https://github.com/facebookresearch/faiss/wiki/Troubleshooting) can be found on the [wiki page](http://github.com/facebookresearch/faiss/wiki)
 - the [doxygen documentation](http://rawgithub.com/facebookresearch/faiss/master/docs/html/annotated.html) gives per-class information
-- to reproduce results from our research papers, [Polysemous codes](https://arxiv.org/abs/1609.01882) and [Billion-scale similarity search with GPUs](https://arxiv.org/abs/1702.08734), refer to the [benchmarks README](benchs/README.md).
+- to reproduce results from our research papers, [Polysemous codes](https://arxiv.org/abs/1609.01882) and [Billion-scale similarity search with GPUs](https://arxiv.org/abs/1702.08734), refer to the [benchmarks README](benchs/README.md). For [
+Link and code: Fast indexing with graphs and compact regression codes](https://arxiv.org/abs/1804.09996), see the [link_and_code README](benchs/link_and_code)
 
 ## Authors
 
@@ -50,6 +57,7 @@ The main authors of Faiss are:
 - [Hervé Jégou](https://github.com/jegou) initiated the Faiss project and wrote its first implementation
 - [Matthijs Douze](https://github.com/mdouze) implemented most of the CPU Faiss
 - [Jeff Johnson](https://github.com/wickedfoo) implemented all of the GPU Faiss
+- [Lucas Hosseini](https://github.com/beauby) implemented the binary indexes
 
 ## Reference
 

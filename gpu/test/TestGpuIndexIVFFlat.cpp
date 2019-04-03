@@ -26,13 +26,17 @@ constexpr float kF32MaxRelErr = 0.03f;
 
 struct Options {
   Options() {
-    numAdd = faiss::gpu::randVal(4000, 20000);
+    numAdd = faiss::gpu::randVal(2000, 5000);
     dim = faiss::gpu::randVal(64, 200);
 
     numCentroids = std::sqrt((float) numAdd);
     numTrain = numCentroids * 40;
     nprobe = faiss::gpu::randVal(10, numCentroids);
     numQuery = faiss::gpu::randVal(32, 100);
+
+    // Due to the approximate nature of the query and of floating point
+    // differences between GPU and CPU, to stay within our error bounds, only
+    // use a small k
     k = std::min(faiss::gpu::randVal(10, 30), numAdd / 40);
     indicesOpt = faiss::gpu::randSelect({
         faiss::gpu::INDICES_CPU,
@@ -71,9 +75,7 @@ void queryTest(faiss::MetricType metricType,
                bool useFloat16CoarseQuantizer,
                bool useFloat16,
                int dimOverride = -1) {
-  for (int tries = 0; tries < 3; ++tries) {
-    faiss::gpu::newTestSeed();
-
+  for (int tries = 0; tries < 2; ++tries) {
     Options opt;
     opt.dim = dimOverride != -1 ? dimOverride : opt.dim;
 
@@ -116,7 +118,7 @@ void queryTest(faiss::MetricType metricType,
                                // FIXME: the fp16 bounds are
                                // useless when math (the accumulator) is
                                // in fp16. Figure out another way to test
-                               compFloat16 ? 0.99f : 0.1f,
+                               compFloat16 ? 0.70f : 0.1f,
                                compFloat16 ? 0.65f : 0.015f);
   }
 }
@@ -124,9 +126,7 @@ void queryTest(faiss::MetricType metricType,
 void addTest(faiss::MetricType metricType,
              bool useFloat16CoarseQuantizer,
              bool useFloat16) {
-  for (int tries = 0; tries < 5; ++tries) {
-    faiss::gpu::newTestSeed();
-
+  for (int tries = 0; tries < 2; ++tries) {
     Options opt;
 
     std::vector<float> trainVecs = faiss::gpu::randVecs(opt.numTrain, opt.dim);
@@ -176,8 +176,6 @@ void addTest(faiss::MetricType metricType,
 
 void copyToTest(bool useFloat16CoarseQuantizer,
                 bool useFloat16) {
-  faiss::gpu::newTestSeed();
-
   Options opt;
   std::vector<float> trainVecs = faiss::gpu::randVecs(opt.numTrain, opt.dim);
   std::vector<float> addVecs = faiss::gpu::randVecs(opt.numAdd, opt.dim);
@@ -226,8 +224,6 @@ void copyToTest(bool useFloat16CoarseQuantizer,
 
 void copyFromTest(bool useFloat16CoarseQuantizer,
                   bool useFloat16) {
-  faiss::gpu::newTestSeed();
-
   Options opt;
   std::vector<float> trainVecs = faiss::gpu::randVecs(opt.numTrain, opt.dim);
   std::vector<float> addVecs = faiss::gpu::randVecs(opt.numAdd, opt.dim);
@@ -391,8 +387,6 @@ TEST(TestGpuIndexIVFFlat, Float32_32_CopyTo) {
 }
 
 TEST(TestGpuIndexIVFFlat, Float32_negative) {
-  faiss::gpu::newTestSeed();
-
   Options opt;
 
   auto trainVecs = faiss::gpu::randVecs(opt.numTrain, opt.dim);
@@ -457,8 +451,6 @@ TEST(TestGpuIndexIVFFlat, Float32_negative) {
 //
 
 TEST(TestGpuIndexIVFFlat, QueryNaN) {
-  faiss::gpu::newTestSeed();
-
   Options opt;
 
   std::vector<float> trainVecs = faiss::gpu::randVecs(opt.numTrain, opt.dim);
@@ -505,8 +497,6 @@ TEST(TestGpuIndexIVFFlat, QueryNaN) {
 }
 
 TEST(TestGpuIndexIVFFlat, AddNaN) {
-  faiss::gpu::newTestSeed();
-
   Options opt;
 
   faiss::gpu::StandardGpuResources res;
@@ -541,9 +531,6 @@ TEST(TestGpuIndexIVFFlat, AddNaN) {
   EXPECT_EQ(gpuIndex.ntotal, 0);
   gpuIndex.add(numNans, nans.data());
 
-  // Only the single valid vector should have added
-  EXPECT_EQ(gpuIndex.ntotal, 1);
-
   std::vector<float> queryVecs = faiss::gpu::randVecs(opt.numQuery, opt.dim);
   std::vector<float> distance(opt.numQuery * opt.k, 0);
   std::vector<faiss::Index::idx_t> indices(opt.numQuery * opt.k, 0);
@@ -551,7 +538,6 @@ TEST(TestGpuIndexIVFFlat, AddNaN) {
   // should not crash
   gpuIndex.search(opt.numQuery, queryVecs.data(), opt.k,
                   distance.data(), indices.data());
-
 }
 
 TEST(TestGpuIndexIVFFlat, UnifiedMemory) {
@@ -563,28 +549,25 @@ TEST(TestGpuIndexIVFFlat, UnifiedMemory) {
     return;
   }
 
-  int dim = 256;
+  int dim = 128;
 
-  int numCentroids = 1024;
-  // 24 GB of vecs should be enough to test unified memory in
-  // oversubscription mode
-  size_t numAdd =
-    (size_t) 1024 * 1024 * 1024 * 24 / ((size_t) dim * sizeof(float));
+  int numCentroids = 256;
+  // Unfortunately it would take forever to add 24 GB in IVFPQ data,
+  // so just perform a small test with data allocated in the unified
+  // memory address space
+  size_t numAdd = 10000;
   size_t numTrain = numCentroids * 40;
   int numQuery = 10;
   int k = 10;
   int nprobe = 8;
 
-  LOG(INFO) << "generating vecs";
   std::vector<float> trainVecs = faiss::gpu::randVecs(numTrain, dim);
   std::vector<float> addVecs = faiss::gpu::randVecs(numAdd, dim);
 
-  LOG(INFO) << "train CPU";
   faiss::IndexFlatL2 quantizer(dim);
   faiss::IndexIVFFlat cpuIndex(&quantizer, dim, numCentroids, faiss::METRIC_L2);
-  LOG(INFO) << "train CPU";
+
   cpuIndex.train(numTrain, trainVecs.data());
-  LOG(INFO) << "add CPU";
   cpuIndex.add(numAdd, addVecs.data());
   cpuIndex.nprobe = nprobe;
 
@@ -600,15 +583,21 @@ TEST(TestGpuIndexIVFFlat, UnifiedMemory) {
                                        numCentroids,
                                        faiss::METRIC_L2,
                                        config);
-  LOG(INFO) << "copy from CPU";
   gpuIndex.copyFrom(&cpuIndex);
   gpuIndex.setNumProbes(nprobe);
-
-  LOG(INFO) << "compare";
 
   faiss::gpu::compareIndices(cpuIndex, gpuIndex,
                              numQuery, dim, k, "Unified Memory",
                              kF32MaxRelErr,
                              0.1f,
                              0.015f);
+}
+
+int main(int argc, char** argv) {
+  testing::InitGoogleTest(&argc, argv);
+
+  // just run with a fixed test seed
+  faiss::gpu::setTestSeed(100);
+
+  return RUN_ALL_TESTS();
 }
