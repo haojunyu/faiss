@@ -1,8 +1,7 @@
 /**
- * Copyright (c) 2015-present, Facebook, Inc.
- * All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
  *
- * This source code is licensed under the BSD+Patents license found in the
+ * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
@@ -12,9 +11,9 @@
 #ifndef FAISS_GPU_RESOURCES_C_H
 #define FAISS_GPU_RESOURCES_C_H
 
+#include <cublas_v2.h>
 #include <cuda_runtime_api.h>
-#include <cublas.h>
-#include "faiss_c.h"
+#include "../faiss_c.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,13 +41,20 @@ int faiss_GpuResources_getDefaultStream(FaissGpuResources*, int, cudaStream_t*);
 int faiss_GpuResources_getPinnedMemory(FaissGpuResources*, void**, size_t*);
 
 /// Returns the stream on which we perform async CPU <-> GPU copies
-int faiss_GpuResources_getAsyncCopyStream(FaissGpuResources*, int, cudaStream_t*);
+int faiss_GpuResources_getAsyncCopyStream(
+        FaissGpuResources*,
+        int,
+        cudaStream_t*);
 
 /// Calls getBlasHandle with the current device
-int faiss_GpuResources_getBlasHandleCurrentDevice(FaissGpuResources*, cublasHandle_t*);
+int faiss_GpuResources_getBlasHandleCurrentDevice(
+        FaissGpuResources*,
+        cublasHandle_t*);
 
 /// Calls getDefaultStream with the current device
-int faiss_GpuResources_getDefaultStreamCurrentDevice(FaissGpuResources*, cudaStream_t*);
+int faiss_GpuResources_getDefaultStreamCurrentDevice(
+        FaissGpuResources*,
+        cudaStream_t*);
 
 /// Synchronizes the CPU with respect to the default stream for the
 /// given device
@@ -59,7 +65,17 @@ int faiss_GpuResources_syncDefaultStream(FaissGpuResources*, int);
 int faiss_GpuResources_syncDefaultStreamCurrentDevice(FaissGpuResources*);
 
 /// Calls getAsyncCopyStream for the current device
-int faiss_GpuResources_getAsyncCopyStreamCurrentDevice(FaissGpuResources*, cudaStream_t*);
+int faiss_GpuResources_getAsyncCopyStreamCurrentDevice(
+        FaissGpuResources*,
+        cudaStream_t*);
+
+FAISS_DECLARE_CLASS(GpuResourcesProvider)
+
+FAISS_DECLARE_DESTRUCTOR(GpuResourcesProvider)
+
+int faiss_GpuResourcesProvider_getResources(
+        FaissGpuResourcesProvider*,
+        FaissGpuResources**);
 
 #ifdef __cplusplus
 }

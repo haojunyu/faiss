@@ -1,12 +1,10 @@
-# Copyright (c) 2015-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the BSD+Patents license found in the
+# This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-#! /usr/bin/env python2
-
 """ more elaborate that test_index.py """
+from __future__ import absolute_import, division, print_function
 
 import numpy as np
 import unittest
@@ -14,8 +12,9 @@ import faiss
 import os
 import shutil
 import tempfile
+import platform
 
-from common import get_dataset_2
+from common_faiss_tests import get_dataset_2
 
 class TestRemove(unittest.TestCase):
 
@@ -25,7 +24,7 @@ class TestRemove(unittest.TestCase):
         nq = 200
         nt = 200
 
-        xt, xb, xq = get_dataset_2(d, nb, nt, nq)
+        xt, xb, xq = get_dataset_2(d, nt, nb, nq)
 
         quantizer = faiss.IndexFlatL2(d)
 
@@ -65,6 +64,8 @@ class TestRemove(unittest.TestCase):
     def test_remove_regular(self):
         self.do_merge_then_remove(False)
 
+    @unittest.skipIf(platform.system() == 'Windows',
+                     'OnDiskInvertedLists is unsupported on Windows.')
     def test_remove_ondisk(self):
         self.do_merge_then_remove(True)
 
@@ -73,9 +74,9 @@ class TestRemove(unittest.TestCase):
 
         index = faiss.IndexFlat(5)
         xb = np.zeros((10, 5), dtype='float32')
-        xb[:, 0] = np.arange(10) + 1000
+        xb[:, 0] = np.arange(10, dtype='int64') + 1000
         index.add(xb)
-        index.remove_ids(np.arange(5) * 2)
+        index.remove_ids(np.arange(5, dtype='int64') * 2)
         xb2 = faiss.vector_float_to_array(index.xb).reshape(5, 5)
         assert np.all(xb2[:, 0] == xb[np.arange(5) * 2 + 1, 0])
 
@@ -84,13 +85,13 @@ class TestRemove(unittest.TestCase):
         xb = np.zeros((10, 5), dtype='float32')
         xb[:, 0] = np.arange(10) + 1000
         index = faiss.IndexIDMap2(sub_index)
-        index.add_with_ids(xb, np.arange(10) + 100)
+        index.add_with_ids(xb, np.arange(10, dtype='int64') + 100)
         assert index.reconstruct(104)[0] == 1004
-        index.remove_ids(np.array([103]))
+        index.remove_ids(np.array([103], dtype='int64'))
         assert index.reconstruct(104)[0] == 1004
         try:
             index.reconstruct(103)
-        except:
+        except RuntimeError:
             pass
         else:
             assert False, 'should have raised an exception'
@@ -115,6 +116,39 @@ class TestRemove(unittest.TestCase):
             else:
                 assert searchres[0] == idx[i]
 
+    def test_remove_id_map_binary(self):
+        sub_index = faiss.IndexBinaryFlat(40)
+        xb = np.zeros((10, 5), dtype='uint8')
+        xb[:, 0] = np.arange(10) + 100
+        index = faiss.IndexBinaryIDMap2(sub_index)
+        index.add_with_ids(xb, np.arange(10, dtype='int64') + 1000)
+        assert index.reconstruct(1004)[0] == 104
+        index.remove_ids(np.array([1003], dtype='int64'))
+        assert index.reconstruct(1004)[0] == 104
+        try:
+            index.reconstruct(1003)
+        except RuntimeError:
+            pass
+        else:
+            assert False, 'should have raised an exception'
+
+        # while we are there, let's test I/O as well...
+        fd, tmpnam = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            faiss.write_index_binary(index, tmpnam)
+            index = faiss.read_index_binary(tmpnam)
+        finally:
+            os.remove(tmpnam)
+
+        assert index.reconstruct(1004)[0] == 104
+        try:
+            index.reconstruct(1003)
+        except RuntimeError:
+            pass
+        else:
+            assert False, 'should have raised an exception'
+
 
 
 class TestRangeSearch(unittest.TestCase):
@@ -124,7 +158,7 @@ class TestRangeSearch(unittest.TestCase):
         xb = np.zeros((10, 5), dtype='float32')
         xb[:, 0] = np.arange(10) + 1000
         index = faiss.IndexIDMap2(sub_index)
-        index.add_with_ids(xb, np.arange(10) + 100)
+        index.add_with_ids(xb, np.arange(10, dtype=np.int64) + 100)
         dist = float(np.linalg.norm(xb[3] - xb[0])) * 0.99
         res_subindex = sub_index.range_search(xb[[0], :], dist)
         res_index = index.range_search(xb[[0], :], dist)
@@ -155,7 +189,8 @@ class TestUpdate(unittest.TestCase):
 
         # revert order of the 200 first vectors
         nu = 200
-        index.update_vectors(np.arange(nu), xb[nu - 1::-1].copy())
+        index.update_vectors(np.arange(nu).astype('int64'),
+                             xb[nu - 1::-1].copy())
 
         recons_after = np.vstack([index.reconstruct(i) for i in range(nb)])
 
@@ -275,6 +310,8 @@ class TestTransformChain(unittest.TestCase):
 
         assert np.all(I == I2)
 
+@unittest.skipIf(platform.system() == 'Windows', \
+                 'Mmap not supported on Windows.')
 class TestRareIO(unittest.TestCase):
 
     def compare_results(self, index1, index2, xq):
@@ -290,7 +327,7 @@ class TestRareIO(unittest.TestCase):
         nb = 1000
         nq = 200
         nt = 200
-        xt, xb, xq = get_dataset_2(d, nb, nt, nq)
+        xt, xb, xq = get_dataset_2(d, nt, nb, nq)
 
         quantizer = faiss.IndexFlatL2(d)
         index1 = faiss.IndexIVFFlat(quantizer, d, 20)
@@ -343,7 +380,7 @@ class TestIVFFlatDedup(unittest.TestCase):
         nb = 1000
         nq = 200
         nt = 500
-        xt, xb, xq = get_dataset_2(d, nb, nt, nq)
+        xt, xb, xq = get_dataset_2(d, nt, nb, nq)
 
         # introduce duplicates
         xb[500:900:2] = xb[501:901:2]
@@ -379,7 +416,8 @@ class TestIVFFlatDedup(unittest.TestCase):
             assert ref == new
 
         # test I/O
-        _, tmpfile = tempfile.mkstemp()
+        fd, tmpfile = tempfile.mkstemp()
+        os.close(fd)
         try:
             faiss.write_index(index_new, tmpfile)
             index_st = faiss.read_index(tmpfile)
@@ -395,6 +433,7 @@ class TestIVFFlatDedup(unittest.TestCase):
 
         # test remove
         toremove = np.hstack((np.arange(3, 1000, 5), np.arange(850, 950)))
+        toremove = toremove.astype(np.int64)
         index_ref.remove_ids(toremove)
         index_new.remove_ids(toremove)
 
@@ -414,7 +453,7 @@ class TestSerialize(unittest.TestCase):
         nb = 1000
         nq = 200
         nt = 500
-        xt, xb, xq = get_dataset_2(d, nb, nt, nq)
+        xt, xb, xq = get_dataset_2(d, nt, nb, nq)
 
         index = faiss.IndexFlatL2(d)
         index.add(xb)
@@ -444,7 +483,8 @@ class TestSerialize(unittest.TestCase):
         Dnew, Inew = index3.search(xq, 5)
         assert np.all(Dnew == Dref) and np.all(Inew == Iref)
 
-
+@unittest.skipIf(platform.system() == 'Windows',
+                 'OnDiskInvertedLists is unsupported on Windows.')
 class TestRenameOndisk(unittest.TestCase):
 
     def test_rename(self):
@@ -453,7 +493,7 @@ class TestRenameOndisk(unittest.TestCase):
         nq = 100
         nt = 100
 
-        xt, xb, xq = get_dataset_2(d, nb, nt, nq)
+        xt, xb, xq = get_dataset_2(d, nt, nb, nq)
 
         quantizer = faiss.IndexFlatL2(d)
 
@@ -488,12 +528,95 @@ class TestRenameOndisk(unittest.TestCase):
                 assert False
 
             # read it with magic flag
-            index2 = faiss.read_index(dirname + '/1/aa.ivf', faiss.IO_FLAG_ONDISK_SAME_DIR)
+            index2 = faiss.read_index(dirname + '/1/aa.ivf',
+                                      faiss.IO_FLAG_ONDISK_SAME_DIR)
             D2, I2 = index2.search(xq, 10)
             assert np.all(I1 == I2)
 
         finally:
             shutil.rmtree(dirname)
+
+
+class TestInvlistMeta(unittest.TestCase):
+
+    def test_slice_vstack(self):
+        d = 10
+        nb = 1000
+        nq = 100
+        nt = 200
+
+        xt, xb, xq = get_dataset_2(d, nt, nb, nq)
+
+        quantizer = faiss.IndexFlatL2(d)
+        index = faiss.IndexIVFFlat(quantizer, d, 30)
+
+        index.train(xt)
+        index.add(xb)
+        Dref, Iref = index.search(xq, 10)
+
+        # faiss.wait()
+
+        il0 = index.invlists
+        ils = []
+        ilv = faiss.InvertedListsPtrVector()
+        for sl in 0, 1, 2:
+            il = faiss.SliceInvertedLists(il0, sl * 10, sl * 10 + 10)
+            ils.append(il)
+            ilv.push_back(il)
+
+        il2 = faiss.VStackInvertedLists(ilv.size(), ilv.data())
+
+        index2 = faiss.IndexIVFFlat(quantizer, d, 30)
+        index2.replace_invlists(il2)
+        index2.ntotal = index.ntotal
+
+        D, I = index2.search(xq, 10)
+        assert np.all(D == Dref)
+        assert np.all(I == Iref)
+
+    def test_stop_words(self):
+        d = 10
+        nb = 1000
+        nq = 1
+        nt = 200
+
+        xt, xb, xq = get_dataset_2(d, nt, nb, nq)
+
+        index = faiss.index_factory(d, "IVF32,Flat")
+        index.nprobe = 4
+        index.train(xt)
+        index.add(xb)
+        Dref, Iref = index.search(xq, 10)
+
+        il = index.invlists
+        maxsz = max(il.list_size(i) for i in range(il.nlist))
+
+        il2 = faiss.StopWordsInvertedLists(il, maxsz + 1)
+        index.own_invlists
+        index.own_invlists = False
+
+        index.replace_invlists(il2, False)
+        D1, I1 = index.search(xq, 10)
+        np.testing.assert_array_equal(Dref, D1)
+        np.testing.assert_array_equal(Iref, I1)
+
+        # cleanup to avoid segfault on exit
+        index.replace_invlists(il, False)
+
+        # voluntarily unbalance one invlist
+        i = int(I1[0, 0])
+        index.add(np.vstack([xb[i]] * (maxsz + 10)))
+
+        # introduce stopwords again
+        index.replace_invlists(il2, False)
+
+        D2, I2 = index.search(xq, 10)
+        self.assertFalse(i in list(I2.ravel()))
+
+        # avoid mem leak
+        index.replace_invlists(il, True)
+
+
 
 
 if __name__ == '__main__':

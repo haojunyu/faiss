@@ -1,384 +1,248 @@
-[//]: # "**********************************************************"
-[//]: # "** INSTALL file for Faiss (Fair AI Similarity Search    **"
-[//]: # "**********************************************************"
+# Installing Faiss via conda
 
-INSTALL file for Faiss (Fair AI Similarity Search)
-==================================================
+The recommended way to install Faiss is through [conda](https://docs.conda.io).
+Stable releases are pushed regularly to the pytorch conda channel, as well as
+pre-release nightly builds.
 
-Install via Conda
------------------
+The CPU-only `faiss-cpu` conda package is currently available on Linux, OSX, and
+Windows. The `faiss-gpu`, containing both CPU and GPU indices, is available on
+Linux systems, for various versions of CUDA.
 
-The easiest way to install FAISS is from anaconda. We regularly push stable releases to conda channel. FAISS conda package is built with conda gcc, depends on libgcc, mkl and numpy package shipped in conda in runtime.
+To install the latest stable release:
 
-Currently we support faiss-cpu on both Linux and OSX platforms. We also provide faiss-gpu compiled with CUDA8.0/CUDA9.0/CUDA9.2 on Linux systems.
+``` shell
+# CPU-only version
+$ conda install -c pytorch faiss-cpu
 
-You can easily install it by
+# GPU(+CPU) version
+$ conda install -c pytorch faiss-gpu
 
-```
-# CPU version only
-conda install faiss-cpu -c pytorch
-# Make sure you have CUDA installed before installing faiss-gpu, otherwise it falls back to CPU version
-conda install faiss-gpu -c pytorch # [DEFAULT]For CUDA8.0
-conda install faiss-gpu cuda90 -c pytorch # For CUDA9.0
-conda install faiss-gpu cuda92 -c pytorch # For CUDA9.2
-# cuda90/cuda91 shown above is a feature, it doesn't install CUDA for you.
+# or for a specific CUDA version
+$ conda install -c pytorch faiss-gpu cudatoolkit=10.2 # for CUDA 10.2
 ```
 
-Compile from source
--------------------
+Nightly pre-release packages can be installed as follows:
 
-The Faiss compilation works in 3 steps, from easiest to most
-involved:
+``` shell
+# CPU-only version
+$ conda install -c pytorch/label/nightly faiss-cpu
 
-1. compile the C++ core and examples
+# GPU(+CPU) version
+$ conda install -c pytorch/label/nightly faiss-gpu
+```
 
-2. compile the Python interface
+## Installing from conda-forge
 
-3. compile GPU part
+Faiss is also being packaged by [conda-forge](https://conda-forge.org/), the
+community-driven packaging ecosystem for conda. The packaging effort is
+collaborating with the Faiss team to ensure high-quality package builds.
 
-Steps 2 and 3 depend on 1, but they are otherwise independent.
+Due to the comprehensive infrastructure of conda-forge, it may even happen that
+certain build combinations are supported in conda-forge that are not available
+through the pytorch channel. To install, use
 
-Alternatively, all 3 steps above can be run by building a Docker image (see
-section "Docker instructions" below).
+``` shell
+# CPU version
+$ conda install -c conda-forge faiss-cpu
+
+# GPU version
+$ conda install -c conda-forge faiss-gpu
+```
+
+You can tell which channel your conda packages come from by using `conda list`.
+If you are having problems using a package built by conda-forge, please raise
+an [issue](https://github.com/conda-forge/faiss-split-feedstock/issues) on the
+conda-forge package "feedstock".
+
+# Building from source
+
+Faiss can be built from source using CMake.
+
+Faiss is supported on x86_64 machines on Linux, OSX, and Windows. It has been
+found to run on other platforms as well, see
+[other platforms](https://github.com/facebookresearch/faiss/wiki/Related-projects#bindings-to-other-languages-and-porting-to-other-platforms).
+
+The basic requirements are:
+- a C++11 compiler (with support for OpenMP support version 2 or higher),
+- a BLAS implementation (we strongly recommend using Intel MKL for best
+performance).
+
+The optional requirements are:
+- for GPU indices:
+  - nvcc,
+  - the CUDA toolkit,
+- for the python bindings:
+  - python 3,
+  - numpy,
+  - and swig.
+
+Indications for specific configurations are available in the [troubleshooting
+section of the wiki](https://github.com/facebookresearch/faiss/wiki/Troubleshooting).
+
+## Step 1: invoking CMake
+
+``` shell
+$ cmake -B build .
+```
+
+This generates the system-dependent configuration/build files in the `build/`
+subdirectory.
+
+Several options can be passed to CMake, among which:
+- general options:
+  - `-DFAISS_ENABLE_GPU=OFF` in order to disable building GPU indices (possible
+  values are `ON` and `OFF`),
+  - `-DFAISS_ENABLE_PYTHON=OFF` in order to disable building python bindings
+  (possible values are `ON` and `OFF`),
+  - `-DBUILD_TESTING=OFF` in order to disable building C++ tests,
+  - `-DBUILD_SHARED_LIBS=ON` in order to build a shared library (possible values
+  are `ON` and `OFF`),
+- optimization-related options:
+  - `-DCMAKE_BUILD_TYPE=Release` in order to enable generic compiler
+  optimization options (enables `-O3` on gcc for instance),
+  - `-DFAISS_OPT_LEVEL=avx2` in order to enable the required compiler flags to
+  generate code using optimized SIMD instructions (possible values are `generic`,
+  `sse4`, and `avx2`, by increasing order of optimization),
+- BLAS-related options:
+  - `-DBLA_VENDOR=Intel10_64_dyn -DMKL_LIBRARIES=/path/to/mkl/libs` to use the
+  Intel MKL BLAS implementation, which is significantly faster than OpenBLAS
+  (more information about the values for the `BLA_VENDOR` option can be found in
+  the [CMake docs](https://cmake.org/cmake/help/latest/module/FindBLAS.html)),
+- GPU-related options:
+  - `-DCUDAToolkit_ROOT=/path/to/cuda-10.1` in order to hint to the path of
+  the CUDA toolkit (for more information, see
+  [CMake docs](https://cmake.org/cmake/help/latest/module/FindCUDAToolkit.html)),
+  - `-DCMAKE_CUDA_ARCHITECTURES="75;72"` for specifying which GPU architectures
+  to build against (see [CUDA docs](https://developer.nvidia.com/cuda-gpus) to
+  determine which architecture(s) you should pick),
+- python-related options:
+  - `-DPython_EXECUTABLE=/path/to/python3.7` in order to build a python
+  interface for a different python than the default one (see
+  [CMake docs](https://cmake.org/cmake/help/latest/module/FindPython.html)).
+
+## Step 2: Invoking Make
+
+``` shell
+$ make -C build -j faiss
+```
+
+This builds the C++ library (`libfaiss.a` by default, and `libfaiss.so` if
+`-DBUILD_SHARED_LIBS=ON` was passed to CMake).
+
+The `-j` option enables parallel compilation of multiple units, leading to a
+faster build, but increasing the chances of running out of memory, in which case
+it is recommended to set the `-j` option to a fixed value (such as `-j4`).
+
+## Step 3: Building the python bindings (optional)
+
+``` shell
+$ make -C build -j swigfaiss
+$ (cd build/faiss/python && python setup.py install)
+```
+
+The first command builds the python bindings for Faiss, while the second one
+generates and installs the python package.
+
+## Step 4: Installing the C++ library and headers (optional)
+
+``` shell
+$ make -C build install
+```
+
+This will make the compiled library (either `libfaiss.a` or `libfaiss.so` on
+Linux) available system-wide, as well as the C++ headers. This step is not
+needed to install the python package only.
 
 
-It is also possible to build a pure C interface. This optional process is
-described separately (please see the [C interface installation file](c_api/INSTALL.md))
+## Step 5: Testing (optional)
 
-General compilation instructions
-================================
+### Running the C++ test suite
 
-Faiss has been tested only on x86_64 machines on Linux and Mac OS.
+To run the whole test suite, make sure that `cmake` was invoked with
+`-DBUILD_TESTING=ON`, and run:
 
-Faiss is compiled via a Makefile. The system-dependent configuration
-of the Makefile is in an include file, makefile.inc. The variables in
-makefile.inc must be set by hand.
+``` shell
+$ make -C build test
+```
 
-Faiss requires a C++ compiler that understands:
-- the Intel intrinsics for SSE instructions
-- the GCC intrinsic for the popcount instruction
-- basic OpenMP
+### Running the python test suite
 
-There are a few models for makefile.inc in the example_makefiles/
-subdirectory. Copy the relevant one for your system and adjust to your
-needs. There are also indications for specific configurations in the
-troubleshooting section of the wiki.
+``` shell
+$ (cd build/faiss/python && python setup.py build)
+$ PYTHONPATH="$(ls -d ./build/faiss/python/build/lib*/)" pytest tests/test_*.py
+```
 
-https://github.com/facebookresearch/faiss/wiki/Troubleshooting
+### Basic example
 
-Faiss comes as a .a archive, that can be linked with executables or
-dynamic libraries (useful for the Python wrapper).
+A basic usage example is available in
+[`demos/demo_ivfpq_indexing.cpp`](https://github.com/facebookresearch/faiss/blob/master/demos/demo_ivfpq_indexing.cpp).
 
+It creates a small index, stores it and performs some searches. A normal runtime
+is around 20s. With a fast machine and Intel MKL's BLAS it runs in 2.5s.
 
-Step 1: Compiling the C++ Faiss
-===============================
+It can be built with
+``` shell
+$ make -C build demo_ivfpq_indexing
+```
+and subsequently ran with
+``` shell
+$ ./build/demos/demo_ivfpq_indexing
+```
 
-TL;DR: `./configure && make && make install`
+### Basic GPU example
 
+``` shell
+$ make -C build demo_ivfpq_indexing_gpu
+$ ./build/demos/demo_ivfpq_indexing_gpu
+```
 
-The CPU version of Faiss is written in C++11.
+This produce the GPU code equivalent to the CPU `demo_ivfpq_indexing`. It also
+shows how to translate indexes from/to a GPU.
 
-BLAS/Lapack
------------
+### A real-life benchmark
 
-The only variables that need to be configured for the C++ Faiss are
-the BLAS/Lapack flags (a linear aglebra software package). It needs a
-flag telling whether BLAS/Lapack uses 32 or 64 bit integers and the
-linking flags. Faiss uses the Fortran 77 interface of BLAS/Lapack and
-thus does not need an include path.
-
-There are several BLAS implementations, depending on the OS and
-machine. To have reasonable performance, the BLAS library should be
-multithreaded. See the example makefile.inc's for hints and examples
-on how to set the flags, or simply run the configure script:
-
-   `./configure`
-
-To check that the link flags are correct, and verify whether the
-implementation uses 32 or 64 bit integers, you can
-
-  `make misc/test_blas`
-
-and run
-
-  `./misc/test_blas`
-
-Building faiss
--------------
-
-Once the proper BLAS flags are set, the library should compile
-smoothly by running
-
-  `make`
-
-Then, in order to install the library and the headers, run
-
-   `make install`
-
-Testing Faiss
--------------
-
-A basic usage example is in
-
-  `demos/demo_ivfpq_indexing`
-
-it makes a small index, stores it and performs some searches. A normal
-runtime is around 20s. With a fast machine and Intel MKL's BLAS it
-runs in 2.5s.
-
-To run the whole test suite:
-
-   `make test`
-
-
-A real-life benchmark
----------------------
-
-A bit longer example runs and evaluates Faiss on the SIFT1M
-dataset. To run it, please download the ANN_SIFT1M dataset from
-
-http://corpus-texmex.irisa.fr/
-
+A longer example runs and evaluates Faiss on the SIFT1M dataset. To run it,
+please download the ANN_SIFT1M dataset from http://corpus-texmex.irisa.fr/
 and unzip it to the subdirectory `sift1M` at the root of the source
 directory for this repository.
 
 Then compile and run the following (after ensuring you have installed faiss):
 
-```
-make demos
-./demos/demo_sift1M
+``` shell
+$ make -C build demo_sift1M
+$ ./build/demos/demo_sift1M
 ```
 
 This is a demonstration of the high-level auto-tuning API. You can try
 setting a different index_key to find the indexing structure that
 gives the best performance.
 
-
-Step 2: Compiling the Python interface
-======================================
-
-The Python interface is compiled with
-
-  `make py`
-
-If you want to compile it for another python version than the default
-Python 2.7, in particular Python 3, the PYTHONCFLAGS must be adjusted in
-makefile.inc, see the examples.
-
-How it works
-------------
-
-The Python interface is provided via SWIG (Simple Wrapper and
-Interface Generator) and an additional level of manual wrappers (in python/faiss.py).
-
-SWIG generates two wrapper files: a Python file (`python/swigfaiss.py`) and a
-C++ file that must be compiled to a dynamic library (`python/_swigfaiss.so`). These
-files are included in the repository, so running swig is only required when
-the C++ headers of Faiss are changed.
-
-The C++ compilation to the dynamic library requires to set:
-
-- `SHAREDFLAGS`: system-specific flags to generate a dynamic library
-
-- `PYTHONCFLAGS`: include flags for Python
-
-See the example makefile.inc's on how to set the flags.
-
-
-Testing the Python wrapper
---------------------------
-
-Often, a successful compile does not mean that the library works,
-because missing symbols are detected only at runtime. You should be
-able to load the Faiss dynamic library:
-
-  `python -c "import faiss"`
-
-In case of failure, it reports the first missing symbol. To see all
-missing symbols (on Linux), use
-
-  `ldd -r _swigfaiss.so`
-
-Sometimes, problems (eg with BLAS libraries) appear only when actually
-calling a BLAS function. A simple way to check this
-
-```python
-python -c "import faiss, numpy
-faiss.Kmeans(10, 20).train(numpy.random.rand(1000, 10).astype('float32'))
-```
-
-
-Real-life test
---------------
+### Real-life test
 
 The following script extends the demo_sift1M test to several types of
-indexes.  This must be run from the root of the source directory for this
+indexes. This must be run from the root of the source directory for this
 repository:
 
-```
-mkdir tmp             # graphs of the output will be written here
-PYTHONPATH=. python demos/demo_auto_tune.py
+``` shell
+$ mkdir tmp  # graphs of the output will be written here
+$ python demos/demo_auto_tune.py
 ```
 
 It will cycle through a few types of indexes and find optimal
 operating points. You can play around with the types of indexes.
 
+### Real-life test on GPU
 
-Step 3: Compiling the GPU implementation
-========================================
+The example above also runs on GPU. Edit `demos/demo_auto_tune.py` at line 100
+with the values
 
-There is a GPU-specific Makefile in the `gpu/` directory. It depends on
-the same ../makefile.inc for system-specific variables. You need
-libfaiss.a from Step 1 for this to work.
-
-The GPU version is a superset of the CPU version. In addition it
-requires the cuda compiler and related libraries (Cublas)
-
-See the example makefile on how to set the flags.
-
-The nvcc-specific flags to pass to the compiler, based on your desired
-compute capability. Only compute capability 3.5+ is supported. For
-example, we enable by default:
-
-```
--gencode arch=compute_35,code="compute_35"
--gencode arch=compute_52,code="compute_52"
--gencode arch=compute_60,code="compute_60"
-```
-
-However, look at https://developer.nvidia.com/cuda-gpus to determine
-what compute capability you need to use, and replace our gencode
-specifications with the one(s) you need.
-
-Most other flags are related to the C++11 compiler used by nvcc to
-complile the actual C++ code. They are normally just transmitted by
-nvcc, except some of them that are not recognized and that should be
-escaped by prefixing them with -Xcompiler. Also link flags that are
-prefixed with -Wl, should be passed with -Xlinker.
-
-Then compile with
-
-  `cd gpu; make`
-
-You may want to add `-j 10` to use 10 threads during compile.
-
-Testing the GPU implementation
-------------------------------
-
-Compile the example with
-
-  `cd gpu; make tests/demo_ivfpq_indexing_gpu`
-
-This produce the GPU code equivalent to the CPU
-demo_ivfpq_indexing. It also shows how to translate indexed from/to
-the GPU.
-
-Compiling the Python interface with GPU support
------------------------------------------------
-
-Given step 2, adding support of the GPU from Python is quite
-straightforward. Run
-
-`cd python; make _swigfaiss_gpu.so`
-
-The import is the same for the GPU version and the CPU-only
-version.
-
-`python -c "import faiss"`
-
-Faiss tries to load the GPU version first, and in case of failure,
-loads the CPU-only version. To investigate more closely the cause of
-a failure, you can run:
-
-`python -c "import _swigfaiss_gpu"`
-
-Python example with GPU support
--------------------------------
-
-The auto-tuning example above also runs on the GPU. Edit
-`demos/demo_auto_tune.py` at line 100 with the values
-
-```python
+``` python
 keys_to_test = keys_gpu
 use_gpu = True
 ```
 
 and you can run
-
+``` shell
+$ python demos/demo_auto_tune.py
 ```
-export PYTHONPATH=.
-python demos/demo_auto_tune.py
-```
-
 to test the GPU code.
-
-
-Docker instructions
-===================
-
-For using GPU capabilities of Faiss, you'll need to run "nvidia-docker"
-rather than "docker". Make sure that docker
-(https://docs.docker.com/engine/installation/) and nvidia-docker
-(https://github.com/NVIDIA/nvidia-docker) are installed on your system
-
-To build the "faiss" image, run
-
-  `nvidia-docker build -t faiss .`
-
-or if you don't want/need to clone the sources, just run
-
-  `nvidia-docker build -t faiss github.com/facebookresearch/faiss`
-
-If you want to run the tests during the docker build, uncomment the
-last 3 "RUN" steps in the Dockerfile. But you might want to run the
-tests by yourself, so just run
-
-  `nvidia-docker run -ti --name faiss faiss bash`
-
-and run what you want. If you need a dataset (like sift1M), download it
-inside the created container, or better, mount a directory from the host
-
-  nvidia-docker run -ti --name faiss -v /my/host/data/folder/ann_dataset/sift/:/opt/faiss/sift1M faiss bash
-
-
-How to use Faiss in your own projects
-=====================================
-
-C++
----
-
-The makefile generates a static and a dynamic library
-
-```
-libfaiss.a
-libfaiss.so (or libfaiss.dylib)
-```
-
-the executable should be linked to one of these. If you use
-the static version (.a), add the LDFLAGS used in the Makefile.
-
-For binary-only distributions, the include files should be under
-a `faiss/` directory, so that they can be included as
-
-```c++
-#include <faiss/IndexIVFPQ.h>
-#include <faiss/gpu/GpuIndexFlat.h>
-```
-
-Python
-------
-
-To import Faiss in your own Python project, you need the files
-
-```
-faiss.py
-swigfaiss.py  / swigfaiss_gpu.py
-_swigfaiss.so / _swigfaiss_gpu.so
-```
-
-to be visible in the PYTHONPATH or in the current directory.
-Then Faiss can be used in python with
-
-```python
-import faiss
-```

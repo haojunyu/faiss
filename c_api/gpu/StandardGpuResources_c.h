@@ -1,8 +1,7 @@
 /**
- * Copyright (c) 2015-present, Facebook, Inc.
- * All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
  *
- * This source code is licensed under the BSD+Patents license found in the
+ * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
@@ -13,16 +12,16 @@
 #define FAISS_STANDARD_GPURESOURCES_C_H
 
 #include <cuda_runtime_api.h>
-#include "faiss_c.h"
-#include "gpu/GpuResources_c.h"
+#include "../faiss_c.h"
+#include "GpuResources_c.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/// Default implementation of GpuResources that allocates a cuBLAS
+/// Default implementation of GpuResourcesProvider that allocates a cuBLAS
 /// stream and 2 streams for use, as well as temporary memory
-FAISS_DECLARE_CLASS_INHERITED(StandardGpuResources, GpuResources)
+FAISS_DECLARE_CLASS_INHERITED(StandardGpuResources, GpuResourcesProvider)
 
 FAISS_DECLARE_DESTRUCTOR(StandardGpuResources)
 
@@ -35,22 +34,26 @@ int faiss_StandardGpuResources_noTempMemory(FaissStandardGpuResources*);
 
 /// Specify that we wish to use a certain fixed size of memory on
 /// all devices as temporary memory
-int faiss_StandardGpuResources_setTempMemory(FaissStandardGpuResources*, size_t size);
-
-/// Specify that we wish to use a certain fraction of memory on
-/// all devices as temporary memory
-int faiss_StandardGpuResources_setTempMemoryFraction(FaissStandardGpuResources*, float fraction);
+int faiss_StandardGpuResources_setTempMemory(
+        FaissStandardGpuResources*,
+        size_t size);
 
 /// Set amount of pinned memory to allocate, for async GPU <-> CPU
 /// transfers
-int faiss_StandardGpuResources_setPinnedMemory(FaissStandardGpuResources*, size_t size);
+int faiss_StandardGpuResources_setPinnedMemory(
+        FaissStandardGpuResources*,
+        size_t size);
 
 /// Called to change the stream for work ordering
-int faiss_StandardGpuResources_setDefaultStream(FaissStandardGpuResources*, int device, cudaStream_t stream);
+int faiss_StandardGpuResources_setDefaultStream(
+        FaissStandardGpuResources*,
+        int device,
+        cudaStream_t stream);
 
 /// Called to change the work ordering streams to the null stream
 /// for all devices
-int faiss_StandardGpuResources_setDefaultNullStreamAllDevices(FaissStandardGpuResources*);
+int faiss_StandardGpuResources_setDefaultNullStreamAllDevices(
+        FaissStandardGpuResources*);
 
 #ifdef __cplusplus
 }

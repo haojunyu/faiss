@@ -1,8 +1,7 @@
 /**
- * Copyright (c) 2015-present, Facebook, Inc.
- * All rights reserved.
+ * Copyright (c) Facebook, Inc. and its affiliates.
  *
- * This source code is licensed under the BSD+Patents license found in the
+ * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
@@ -12,9 +11,9 @@
 #ifndef INDEX_LSH_C_H
 #define INDEX_LSH_C_H
 
-#include "faiss_c.h"
-#include "Index_c.h"
 #include "Clustering_c.h"
+#include "Index_c.h"
+#include "faiss_c.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,7 +31,12 @@ FAISS_DECLARE_GETTER(IndexLSH, int, train_thresholds)
 
 int faiss_IndexLSH_new(FaissIndexLSH** p_index, idx_t d, int nbits);
 
-int faiss_IndexLSH_new_with_options(FaissIndexLSH** p_index, idx_t d, int nbits, int rotate_data, int train_thresholds);
+int faiss_IndexLSH_new_with_options(
+        FaissIndexLSH** p_index,
+        idx_t d,
+        int nbits,
+        int rotate_data,
+        int train_thresholds);
 
 #ifdef __cplusplus
 }

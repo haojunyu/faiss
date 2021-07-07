@@ -1,18 +1,17 @@
-# Copyright (c) 2015-present, Facebook, Inc.
-# All rights reserved.
+# Copyright (c) Facebook, Inc. and its affiliates.
 #
-# This source code is licensed under the BSD+Patents license found in the
+# This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-#! /usr/bin/env python2
-
+from __future__ import absolute_import, division, print_function
+# noqa E741
 # translation of test_knn.lua
 
 import numpy as np
 import unittest
 import faiss
 
-from common import Randu10k, get_dataset_2, Randu10kUnbalanced
+from common_faiss_tests import Randu10k, get_dataset_2, Randu10kUnbalanced
 
 ev = Randu10k()
 
@@ -47,10 +46,18 @@ class IndexAccuracy(unittest.TestCase):
     def test_ivf_kmeans(self):
         ivfk = faiss.IndexIVFFlat(faiss.IndexFlatL2(d), d, ncentroids)
         ivfk.nprobe = kprobe
-        res = ev.launch('IVF K-means', ivfk)
+        res = ev.launch('IndexIVFFlat', ivfk)
         e = ev.evalres(res)
         # should give 0.260  0.260  0.260
         assert e[1] > 0.2
+
+        # test parallel mode
+        Dref, Iref = ivfk.search(ev.xq, 100)
+        ivfk.parallel_mode = 1
+        Dnew, Inew = ivfk.search(ev.xq, 100)
+        print((Iref != Inew).sum(), Iref.size)
+        assert (Iref != Inew).sum() < Iref.size / 5000.0
+        assert np.all(Dref == Dnew)
 
     def test_indexLSH(self):
         q = faiss.IndexLSH(d, nbits)
@@ -150,6 +157,16 @@ class IndexAccuracy(unittest.TestCase):
         # should give 0.234  0.236  0.236
         assert e[10] > 0.235
 
+    def test_polysemous_OOM(self):
+        """ this used to cause OOM when training polysemous with large
+        nb bits"""
+        d = 32
+        xt, xb, xq = get_dataset_2(d, 10000, 0, 0)
+        index = faiss.IndexPQ(d, M, 13)
+        index.do_polysemous_training = True
+        index.pq.cp.niter = 0
+        index.polysemous_training.max_memory = 128 * 1024 * 1024
+        self.assertRaises(RuntimeError, index.train, xt)
 
 
 class TestSQFlavors(unittest.TestCase):
@@ -200,19 +217,6 @@ class TestSQFlavors(unittest.TestCase):
         index2.add(xb2)
         return index2.search(xq2, 10)
 
-    # run on Sept 6, 2018 with nprobe=1
-    ref_results_xx = {
-        (1, '8bit'): 387,
-        (1, '4bit'): 216,
-        (1, '8bit_uniform'): 387,
-        (1, '4bit_uniform'): 216,
-        (1, 'fp16'): 387,
-        (0, '8bit'): 364,
-        (0, '4bit'): 187,
-        (0, '8bit_uniform'): 364,
-        (0, '4bit_uniform'): 186,
-        (0, 'fp16'): 364,
-    }
 
     # run on Sept 18, 2018 with nprobe=4 + 4 bit bugfix
     ref_results = {
@@ -226,19 +230,21 @@ class TestSQFlavors(unittest.TestCase):
         (1, '8bit_uniform'): 979,
         (1, '4bit_uniform'): 972,
         (1, 'fp16'): 979,
+        # added 2019-06-26
+        (0, '6bit'): 985,
+        (1, '6bit'): 987,
     }
-
 
     def subtest(self, mt):
         d = 32
-        xt, xb, xq = get_dataset_2(d, 1000, 2000, 200)
+        xt, xb, xq = get_dataset_2(d, 2000, 1000, 200)
         nlist = 64
 
         gt_index = faiss.IndexFlat(d, mt)
         gt_index.add(xb)
         gt_D, gt_I = gt_index.search(xq, 10)
         quantizer = faiss.IndexFlat(d, mt)
-        for qname in '8bit 4bit 8bit_uniform 4bit_uniform fp16'.split():
+        for qname in '8bit 4bit 8bit_uniform 4bit_uniform fp16 6bit'.split():
             qtype = getattr(faiss.ScalarQuantizer, 'QT_' + qname)
             index = faiss.IndexIVFScalarQuantizer(
                 quantizer, d, nlist, qtype, mt)
@@ -248,10 +254,13 @@ class TestSQFlavors(unittest.TestCase):
             D, I = index.search(xq, 10)
             ninter = faiss.eval_intersection(I, gt_I)
             print('(%d, %s): %d, ' % (mt, repr(qname), ninter))
-            assert abs(ninter - self.ref_results[(mt, qname)]) <= 9
+            assert abs(ninter - self.ref_results[(mt, qname)]) <= 10
+
+            if qname == '6bit':
+                # the test below fails triggers ASAN. TODO check what's wrong
+                continue
 
             D2, I2 = self.subtest_add2col(xb, xq, index, qname)
-
             assert np.all(I2 == I)
 
             # also test range search
@@ -277,6 +286,16 @@ class TestSQFlavors(unittest.TestCase):
             print('ndiff %d / %d' % (ndiff, ntot))
             assert ndiff < ntot * 0.01
 
+            for pm in 1, 2:
+                print('parallel_mode=%d' % pm)
+                index.parallel_mode = pm
+                lims4, D4, I4 = index.range_search(xq, radius)
+                print('sizes', lims4[1:] - lims4[:-1])
+                for qno in range(len(lims) - 1):
+                    Iref = I3[lims[qno]: lims[qno+1]]
+                    Inew = I4[lims4[qno]: lims4[qno+1]]
+                    assert set(Iref) == set(Inew), "q %d ref %s new %s" % (
+                        qno, Iref, Inew)
 
     def test_SQ_IP(self):
         self.subtest(faiss.METRIC_INNER_PRODUCT)
@@ -284,11 +303,28 @@ class TestSQFlavors(unittest.TestCase):
     def test_SQ_L2(self):
         self.subtest(faiss.METRIC_L2)
 
+    def test_parallel_mode(self):
+        d = 32
+        xt, xb, xq = get_dataset_2(d, 2000, 1000, 200)
+
+        index = faiss.index_factory(d, "IVF64,SQ8")
+        index.train(xt)
+        index.add(xb)
+        index.nprobe = 4   # hopefully more robust than 1
+        Dref, Iref = index.search(xq, 10)
+
+        for pm in 1, 2, 3:
+            index.parallel_mode = pm
+
+            Dnew, Inew = index.search(xq, 10)
+            np.testing.assert_array_equal(Iref, Inew)
+            np.testing.assert_array_equal(Dref, Dnew)
+
 
 class TestSQByte(unittest.TestCase):
 
     def subtest_8bit_direct(self, metric_type, d):
-        xt, xb, xq = get_dataset_2(d, 1000, 500, 30)
+        xt, xb, xq = get_dataset_2(d, 500, 1000, 30)
 
         # rescale everything to get integer
         tmin, tmax = xt.min(), xt.max()
@@ -344,6 +380,61 @@ class TestSQByte(unittest.TestCase):
                 self.subtest_8bit_direct(metric_type, d)
 
 
+class TestNNDescent(unittest.TestCase):
+
+    def test_L1(self):
+        search_Ls = [10, 20, 30]
+        thresholds = [0.83, 0.92, 0.95]
+        for search_L, threshold in zip(search_Ls, thresholds):
+            self.subtest(32, faiss.METRIC_L1, 10, search_L, threshold)
+
+    def test_L2(self):
+        search_Ls = [10, 20, 30]
+        thresholds = [0.83, 0.92, 0.95]
+        for search_L, threshold in zip(search_Ls, thresholds):
+            self.subtest(32, faiss.METRIC_L2, 10, search_L, threshold)
+
+    def test_IP(self):
+        search_Ls = [10, 20, 30]
+        thresholds = [0.80, 0.90, 0.93]
+        for search_L, threshold in zip(search_Ls, thresholds):
+            self.subtest(32, faiss.METRIC_INNER_PRODUCT, 10, search_L, threshold)
+
+    def subtest(self, d, metric, topk, search_L, threshold):
+        metric_names = {faiss.METRIC_L1: 'L1',
+                        faiss.METRIC_L2: 'L2',
+                        faiss.METRIC_INNER_PRODUCT: 'IP'}
+        topk = 10
+        nt, nb, nq = 2000, 1000, 200
+        xt, xb, xq = get_dataset_2(d, nt, nb, nq)
+        gt_index = faiss.IndexFlat(d, metric)
+        gt_index.add(xb)
+        gt_D, gt_I = gt_index.search(xq, topk)
+
+        K = 16
+        index = faiss.IndexNNDescentFlat(d, K, metric)
+        index.nndescent.S = 10
+        index.nndescent.R = 32
+        index.nndescent.L = K + 20
+        index.nndescent.iter = 5
+        index.verbose = False
+
+        index.nndescent.search_L = search_L
+
+        index.add(xb)
+        D, I = index.search(xq, topk)
+        recalls = 0
+        for i in range(nq):
+            for j in range(topk):
+                for k in range(topk):
+                    if I[i, j] == gt_I[i, k]:
+                        recalls += 1
+                        break
+        recall = 1.0 * recalls / (nq * topk)
+        print('Metric: {}, L: {}, Recall@{}: {}'.format(
+            metric_names[metric], search_L, topk, recall))
+        assert recall > threshold, '{} <= {}'.format(recall, threshold)
+
 
 class TestPQFlavors(unittest.TestCase):
 
@@ -365,7 +456,7 @@ class TestPQFlavors(unittest.TestCase):
 
     def subtest(self, mt):
         d = 32
-        xt, xb, xq = get_dataset_2(d, 1000, 2000, 200)
+        xt, xb, xq = get_dataset_2(d, 2000, 1000, 200)
         nlist = 64
 
         gt_index = faiss.IndexFlat(d, mt)
@@ -412,6 +503,61 @@ class TestPQFlavors(unittest.TestCase):
                 # polysemous behaves bizarrely on ARM
                 assert (ninter >= self.ref_results[
                     mt, by_residual, index.polysemous_ht] - 4)
+
+            # also test range search
+
+            if mt == faiss.METRIC_INNER_PRODUCT:
+                radius = float(D[:, -1].max())
+            else:
+                radius = float(D[:, -1].min())
+            print('radius', radius)
+
+            lims, D3, I3 = index.range_search(xq, radius)
+            ntot = ndiff = 0
+            for i in range(len(xq)):
+                l0, l1 = lims[i], lims[i + 1]
+                Inew = set(I3[l0:l1])
+                if mt == faiss.METRIC_INNER_PRODUCT:
+                    mask = D2[i] > radius
+                else:
+                    mask = D2[i] < radius
+                Iref = set(I2[i, mask])
+                ndiff += len(Inew ^ Iref)
+                ntot += len(Iref)
+            print('ndiff %d / %d' % (ndiff, ntot))
+            assert ndiff < ntot * 0.02
+
+    def test_IVFPQ_non8bit(self):
+        d = 16
+        xt, xb, xq = get_dataset_2(d, 10000, 2000, 200)
+        nlist = 64
+
+        gt_index = faiss.IndexFlat(d)
+        gt_index.add(xb)
+        gt_D, gt_I = gt_index.search(xq, 10)
+
+        quantizer = faiss.IndexFlat(d)
+        ninter = {}
+        for v in '2x8', '8x2':
+            if v == '8x2':
+                index = faiss.IndexIVFPQ(
+                    quantizer, d, nlist, 2, 8)
+            else:
+                index = faiss.IndexIVFPQ(
+                    quantizer, d, nlist, 8, 2)
+            index.train(xt)
+            index.add(xb)
+            index.npobe = 16
+
+            D, I = index.search(xq, 10)
+            ninter[v] = faiss.eval_intersection(I, gt_I)
+        print('ninter=', ninter)
+        # this should be the case but we don't observe
+        # that... Probavly too few test points
+        #  assert ninter['2x8'] > ninter['8x2']
+        # ref numbers on 2019-11-02
+        assert abs(ninter['2x8'] - 458) < 4
+        assert abs(ninter['8x2'] - 465) < 4
 
 
 class TestFlat1D(unittest.TestCase):
@@ -468,7 +614,8 @@ class OPQRelativeAccuracy(unittest.TestCase):
         print('e_opq=%s' % e_opq)
 
         # verify that OPQ better than PQ
-        assert(e_opq[10] > e_pq[10])
+        for r in 1, 10, 100:
+            assert(e_opq[r] > e_pq[r])
 
     def test_OIVFPQ(self):
         # Parameters inverted indexes
@@ -484,6 +631,7 @@ class OPQRelativeAccuracy(unittest.TestCase):
         res = ev.launch('IVFPQ', index)
         e_ivfpq = ev.evalres(res)
 
+        quantizer = faiss.IndexFlatL2(d)
         index_ivfpq = faiss.IndexIVFPQ(quantizer, d, ncentroids, M, 8)
         index_ivfpq.nprobe = 5
         opq_matrix = faiss.OPQMatrix(d, M)
@@ -493,9 +641,10 @@ class OPQRelativeAccuracy(unittest.TestCase):
         res = ev.launch('O+IVFPQ', index)
         e_oivfpq = ev.evalres(res)
 
-        # TODO(beauby): Fix and re-enable.
         # verify same on OIVFPQ
-        # assert(e_oivfpq[1] > e_ivfpq[1])
+        for r in 1, 10, 100:
+            print(e_oivfpq[r], e_ivfpq[r])
+            assert(e_oivfpq[r] >= e_ivfpq[r])
 
 
 class TestRoundoff(unittest.TestCase):
@@ -531,6 +680,118 @@ class TestRoundoff(unittest.TestCase):
         assert np.all(I.ravel() == np.arange(nq))
 
 
+class TestSpectralHash(unittest.TestCase):
 
-if __name__ == '__main__':
-    unittest.main()
+    # run on 2019-04-02
+    ref_results = {
+        (32, 'global', 10): 505,
+        (32, 'centroid', 10): 524,
+        (32, 'centroid_half', 10): 21,
+        (32, 'median', 10): 510,
+        (32, 'global', 1): 8,
+        (32, 'centroid', 1): 20,
+        (32, 'centroid_half', 1): 26,
+        (32, 'median', 1): 14,
+        (64, 'global', 10): 768,
+        (64, 'centroid', 10): 767,
+        (64, 'centroid_half', 10): 21,
+        (64, 'median', 10): 765,
+        (64, 'global', 1): 28,
+        (64, 'centroid', 1): 21,
+        (64, 'centroid_half', 1): 20,
+        (64, 'median', 1): 29,
+        (128, 'global', 10): 968,
+        (128, 'centroid', 10): 945,
+        (128, 'centroid_half', 10): 21,
+        (128, 'median', 10): 958,
+        (128, 'global', 1): 271,
+        (128, 'centroid', 1): 279,
+        (128, 'centroid_half', 1): 171,
+        (128, 'median', 1): 253,
+    }
+
+    def test_sh(self):
+        d = 32
+        xt, xb, xq = get_dataset_2(d, 2000, 1000, 200)
+        nlist, nprobe = 1, 1
+
+        gt_index = faiss.IndexFlatL2(d)
+        gt_index.add(xb)
+        gt_D, gt_I = gt_index.search(xq, 10)
+
+        for nbit in 32, 64, 128:
+            quantizer = faiss.IndexFlatL2(d)
+
+            index_lsh = faiss.IndexLSH(d, nbit, True)
+            index_lsh.add(xb)
+            D, I = index_lsh.search(xq, 10)
+            ninter = faiss.eval_intersection(I, gt_I)
+
+            print('LSH baseline: %d' % ninter)
+
+            for period in 10.0, 1.0:
+
+                for tt in 'global centroid centroid_half median'.split():
+                    index = faiss.IndexIVFSpectralHash(quantizer, d, nlist,
+                                                       nbit, period)
+                    index.nprobe = nprobe
+                    index.threshold_type = getattr(
+                        faiss.IndexIVFSpectralHash,
+                        'Thresh_' + tt
+                    )
+
+                    index.train(xt)
+                    index.add(xb)
+                    D, I = index.search(xq, 10)
+
+                    ninter = faiss.eval_intersection(I, gt_I)
+                    key = (nbit, tt, period)
+
+                    print('(%d, %s, %g): %d, ' % (nbit, repr(tt), period, ninter))
+                    assert abs(ninter - self.ref_results[key]) <= 12
+
+
+class TestRefine(unittest.TestCase):
+
+    def do_test(self, metric):
+        d = 32
+        xt, xb, xq = get_dataset_2(d, 2000, 1000, 200)
+        index1 = faiss.index_factory(d, "PQ4x4np", metric)
+        Dref, Iref = faiss.knn(xq, xb, 10, metric)
+
+        index1.train(xt)
+        index1.add(xb)
+
+        D1, I1 = index1.search(xq, 100)
+
+        recall1 = (I1 == Iref[:, :1]).sum()
+
+        # add refine index on top
+        index_flat = faiss.IndexFlat(d, metric)
+        index_flat.add(xb)
+
+        index2 = faiss.IndexRefine(index1, index_flat)
+        index2.k_factor = 10.0
+        D2, I2 = index2.search(xq, 10)
+
+        # check distance is computed properly
+        for i in range(len(xq)):
+            x1 = xq[i]
+            x2 = xb[I2[i, 5]]
+            if metric == faiss.METRIC_L2:
+                dref = ((x1 - x2) ** 2).sum()
+            else:
+                dref = np.dot(x1, x2)
+            np.testing.assert_almost_equal(dref, D2[i, 5], decimal=5)
+
+        # check that with refinement, the recall@10 is the same as
+        # the original recall@100
+        recall2 = (I2 == Iref[:, :1]).sum()
+        # print("recalls", recall1, recall2)
+        self.assertEqual(recall1, recall2)
+
+    def test_IP(self):
+        self.do_test(faiss.METRIC_INNER_PRODUCT)
+
+    def test_L2(self):
+        self.do_test(faiss.METRIC_L2)
